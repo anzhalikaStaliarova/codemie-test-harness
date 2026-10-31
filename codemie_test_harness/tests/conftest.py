@@ -1135,6 +1135,20 @@ def analytics_utils(client):
 
 
 @pytest.fixture(scope="session")
+def production_smoke_session():
+    """Metadata of the CLI session seeded by the Production release smoke run.
+
+    Read entirely from the environment (CLI_ANALYTICS_SMOKE_RUN_ID and the JSON fixture
+    CLI_ANALYTICS_SMOKE_SESSION_FIXTURE points to); skips cleanly when either is absent.
+    """
+    from codemie_test_harness.tests.test_data.cli_analytics_production_smoke_test_data import (
+        load_production_smoke_session,
+    )
+
+    return load_production_smoke_session()
+
+
+@pytest.fixture(scope="session")
 def webhook_utils(client):
     return WebhookUtils(client)
 

@@ -90,6 +90,27 @@ class CLIAnalyticsSessionModal(BasePage):
         return self
 
     @step
+    def should_show_session_metadata(
+        self, *, model: str, user: str, repository: str, branch: str
+    ):
+        """Assert the dialog shows the session's model, user, repository and branch.
+
+        Like should_have_title, the live component renders no data-testid for these
+        fields; each is located by its own exact visible text within the dialog.
+        """
+        for label, value in (
+            ("model", model),
+            ("user", user),
+            ("repository", repository),
+            ("branch", branch),
+        ):
+            expect(
+                self.root.get_by_text(value, exact=False).first,
+                f"Session dialog should show its {label} ({value!r})",
+            ).to_be_visible(timeout=15000)
+        return self
+
+    @step
     def should_have_session_details(self):
         """Assert the session body rendered all its widgets, without errors."""
         for title in self.WIDGET_TITLES:

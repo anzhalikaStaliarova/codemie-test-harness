@@ -85,3 +85,28 @@ def test_cli_analytics_tool_success_dash_when_no_tool_calls(
 
     user_modal = cli_analytics.open_first_user_modal()
     user_modal.should_show_tool_success_dash()
+
+
+@pytest.mark.cli_analytics
+@pytest.mark.ui
+def test_cli_analytics_production_smoke_session_in_sessions_table(
+    page, production_smoke_session
+):
+    # @case execute-repeatable-production-release-smoke_TC_003
+    """The Production smoke session is found by its Run ID and its detail modal shows
+    the expected model, user, repository and branch."""
+    cli_analytics = CLIAnalyticsPage(page).navigate_to()
+    cli_analytics.open_section(CLIAnalyticsSection.SESSIONS)
+    cli_analytics.should_have_loaded_section(CLIAnalyticsSection.SESSIONS)
+
+    cli_analytics.search_sessions(production_smoke_session.run_id)
+    session_modal = cli_analytics.open_session(production_smoke_session.run_id)
+    session_modal.should_show_session_metadata(
+        model=production_smoke_session.model,
+        user=production_smoke_session.user,
+        repository=production_smoke_session.repository,
+        branch=production_smoke_session.branch,
+    )
+
+    session_modal.close()
+    session_modal.should_be_closed()
