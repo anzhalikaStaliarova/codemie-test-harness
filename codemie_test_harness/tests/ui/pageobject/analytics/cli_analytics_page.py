@@ -378,3 +378,25 @@ class CLIAnalyticsPage(BasePage):
             "cell-tool-success should display the em dash when tool_calls = 0",
         ).to_have_text(self.EM_DASH, timeout=15000)
         return self
+
+    @step
+    def should_list_exactly_one_session(self, text: str):
+        """Assert the Sessions table lists exactly one row matching `text`."""
+        expect(
+            self.session_row(text),
+            f"Sessions table should list exactly one row matching '{text}'",
+        ).to_have_count(1, timeout=15000)
+        return self
+
+    @step
+    def should_list_no_sessions(self):
+        """Assert the Sessions table has no data rows (only the empty-table message)."""
+        expect(
+            self.session_rows,
+            "Sessions table should list no rows for this search",
+        ).to_have_count(0, timeout=15000)
+        expect(
+            self.section_panel.get_by_text(self.EMPTY_TABLE_TEXT, exact=True),
+            "Sessions table should show its empty-table message",
+        ).to_be_visible(timeout=15000)
+        return self

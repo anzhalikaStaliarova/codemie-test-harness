@@ -63,6 +63,20 @@ class CLIAnalyticsSessionModal(BasePage):
         """Message shown when the session detail came back empty."""
         return self.root.get_by_text(self.NO_DATA_TEXT, exact=True)
 
+    @property
+    def subtitle(self) -> Locator:
+        """The dialog's one-line subtitle: harness/model/repository/branch/framework.
+
+        SessionModal.tsx builds it as a single text node, not one element per field:
+        ``[harness_name, model_name, repository, branch, delivery_framework]
+        .filter(Boolean).join(' · ')`` (blank components omitted, not a blank segment).
+        The class combination below (``text-xs text-text-secondary truncate``) is unique
+        to this span in the whole frontend (verified against codemie-ui source), so it
+        cannot match one of SessionTimeline's own ``text-xs text-text-secondary`` spans
+        rendered lower in the same dialog.
+        """
+        return self.root.locator("span.text-xs.text-text-secondary.truncate")
+
     # ── Actions ──────────────────────────────────────────────────────────────────
 
     @step
@@ -90,24 +104,33 @@ class CLIAnalyticsSessionModal(BasePage):
         return self
 
     @step
-    def should_show_session_metadata(
-        self, *, model: str, user: str, repository: str, branch: str
-    ):
-        """Assert the dialog shows the session's model, user, repository and branch.
+    def should_show_session_metadata(self, *, model: str, repository: str, branch: str):
+        """Assert the dialog's subtitle shows the session's exact model, repository
+        and branch, each as its own segment of the joined subtitle string (see the
+        `subtitle` locator). Exact per-segment equality, not a substring/contains
+        check, so e.g. a `branch` value cannot pass by matching a longer segment that
+        merely contains it.
 
-        Like should_have_title, the live component renders no data-testid for these
-        fields; each is located by its own exact visible text within the dialog.
+        The dialog (SessionModal.tsx / SessionBody.tsx) never renders the session's
+        user/developer anywhere, and neither does the Sessions table row it was opened
+        from (SessionsView.tsx has no such column): developer_name is only ever shown
+        on the separate Users/Cost tabs, aggregated across sessions, not per-session.
+        So it cannot be asserted here or from this flow.
         """
+        expect(
+            self.subtitle, "Session dialog should show its subtitle line"
+        ).to_be_visible(timeout=15000)
+        segments = [s.strip() for s in self.subtitle.inner_text().split("·")]
+        segments = [s for s in segments if s]
         for label, value in (
             ("model", model),
-            ("user", user),
             ("repository", repository),
             ("branch", branch),
         ):
-            expect(
-                self.root.get_by_text(value, exact=False).first,
-                f"Session dialog should show its {label} ({value!r})",
-            ).to_be_visible(timeout=15000)
+            assert value in segments, (
+                f"Session dialog subtitle should show its {label} ({value!r}) as its "
+                f"own segment, got segments: {segments}"
+            )
         return self
 
     @step
