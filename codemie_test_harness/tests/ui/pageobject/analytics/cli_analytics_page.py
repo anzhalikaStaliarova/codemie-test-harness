@@ -84,6 +84,7 @@ class CLIAnalyticsPage(BasePage):
         ),
     }
     DEFAULT_SECTION = CLIAnalyticsSection.OVERVIEW
+    SECTION_RESPONSE_TIMEOUT_MS = 120_000
     # The section buttons expose no aria-pressed/aria-selected; the active one is
     # only distinguishable by this background class.
     ACTIVE_SECTION_CLASS = re.compile(r"\bbg-surface-interactive-active\b")
@@ -181,6 +182,42 @@ class CLIAnalyticsPage(BasePage):
             .filter(has_not=self.page.get_by_text(self.EMPTY_TABLE_TEXT, exact=True))
         )
 
+    def metric_label(self, label: str) -> Locator:
+        """Label paragraph of a metric card in the active section, by exact text.
+
+        Cards render no data-testid: <p>label</p> (in a header div), then the value
+        <p> and an optional description <p> as siblings of that header.
+        """
+        return (
+            self.section_panel.locator("p")
+            .filter(has_text=re.compile(rf"^{re.escape(label)}$"))
+            .first
+        )
+
+    def metric_value(self, label: str) -> Locator:
+        """Value paragraph of a metric card in the active section."""
+        return self.metric_label(label).locator("xpath=../following-sibling::p[1]")
+
+    def metric_description(self, label: str) -> Locator:
+        """Description paragraph of a metric card in the active section."""
+        return self.metric_label(label).locator("xpath=../following-sibling::p[2]")
+
+    @property
+    def time_period_region(self) -> Locator:
+        """'TIME PERIOD' filter region of the analytics sidebar."""
+        return self.page.get_by_role("region", name="TIME PERIOD", exact=True)
+
+    @property
+    def sessions_framework_select(self) -> Locator:
+        """'All frameworks' dropdown of the Sessions table."""
+        return self.section_panel.get_by_role("button", name="All frameworks")
+
+    def table_page_button(self, number: int) -> Locator:
+        """Paginator button of the active section's table, by 1-based page number."""
+        return self.section_panel.get_by_role("navigation", name="Page:").get_by_role(
+            "button", name=f"Page {number}", exact=True
+        )
+
     def _user_row_tool_success_cell(self, row: Locator) -> Locator:
         """Tool Success cell in a Users table row (5th column, index 4).
 
@@ -192,11 +229,28 @@ class CLIAnalyticsPage(BasePage):
 
     # ── Actions ──────────────────────────────────────────────────────────────────
 
-    def expect_section_data(self, section: CLIAnalyticsSection) -> ExitStack:
+    def _is_api_response(self, response, endpoint: str, params: dict | None) -> bool:
+        """GET response of ``<API_PATH><endpoint>`` whose query has every given param."""
+        url = urlparse(response.url)
+        if response.request.method != "GET" or not url.path.endswith(
+            self.API_PATH + endpoint
+        ):
+            return False
+        query = parse_qs(url.query)
+        return all(query.get(k) == [str(v)] for k, v in (params or {}).items())
+
+    def expect_section_data(
+        self,
+        section: CLIAnalyticsSection,
+        responses: dict | None = None,
+        params: dict | None = None,
+    ) -> ExitStack:
         """Context manager that waits for all data requests of a section.
 
         Wrap the action that mounts the section; on exit every endpoint of the
         section has answered and each response is asserted to be successful.
+        Only requests carrying all ``params`` count. When ``responses`` is given,
+        it receives each endpoint's ``data`` payload: what the section renders.
         """
         waiters = []
 
@@ -209,6 +263,8 @@ class CLIAnalyticsPage(BasePage):
                     f"CLI Analytics '{section}': {endpoint} request failed "
                     f"with HTTP {response.status}"
                 )
+                if responses is not None:
+                    responses[endpoint] = response.json()["data"]
 
         stack = ExitStack()
         # Exit callbacks run in reverse order: registered first, this one runs
@@ -217,23 +273,50 @@ class CLIAnalyticsPage(BasePage):
         for endpoint in self.SECTIONS[section].endpoints:
             waiter = stack.enter_context(
                 self.page.expect_response(
-                    lambda r, e=endpoint: r.request.method == "GET"
-                    and urlparse(r.url).path.endswith(self.API_PATH + e),
-                    timeout=30000,
+                    lambda r, e=endpoint: self._is_api_response(r, e, params),
+                    timeout=self.SECTION_RESPONSE_TIMEOUT_MS,
                 )
             )
             waiters.append((endpoint, waiter))
         return stack
 
+    def _expect_sessions(self, **params):
+        """Wait for the Sessions table request carrying all ``params``."""
+        return self.page.expect_response(
+            lambda r: self._is_api_response(r, "sessions", params), timeout=30000
+        )
+
+    @staticmethod
+    def _data_of(response, action: str) -> dict:
+        assert response.ok, f"{action} request failed with HTTP {response.status}"
+        return response.json()["data"]
+
+    def read_table(self, rows: Locator) -> list[dict[str, str]]:
+        """Rendered text of each row, keyed by its table's column headers.
+
+        Read in one round trip after the rows are rendered; whitespace is collapsed.
+        """
+        expect(rows.first).to_be_visible(timeout=15000)
+        return rows.evaluate_all(
+            """rows => rows.map(row => {
+                const norm = el => el.innerText.replace(/\\s+/g, ' ').trim();
+                const headers = [...row.closest('table').querySelectorAll('th')].map(norm);
+                return Object.fromEntries([...row.cells].map((c, i) => [headers[i], norm(c)]));
+            })"""
+        )
+
     @step
-    def navigate_to(self):
-        """Open CLI Analytics by URL and wait for the default section data."""
-        with self.expect_section_data(self.DEFAULT_SECTION):
+    def navigate_to(self, responses: dict | None = None):
+        """Open CLI Analytics by URL and wait for the default section data.
+
+        ``responses`` receives the data the section renders (see ``expect_section_data``).
+        """
+        with self.expect_section_data(self.DEFAULT_SECTION, responses):
             self.page.goto(self.PATH)
         return self.should_be_visible()
 
     @step
-    def open_section(self, section: CLIAnalyticsSection):
+    def open_section(self, section: CLIAnalyticsSection, responses: dict | None = None):
         """Open a section that is not active yet and wait for its data."""
         button = self.section_button(section)
         expect(button).to_be_visible(timeout=15000)
@@ -241,31 +324,51 @@ class CLIAnalyticsPage(BasePage):
             button,
             f"'{section}' is already active; clicking it would not reload data",
         ).not_to_have_class(self.ACTIVE_SECTION_CLASS)
-        with self.expect_section_data(section):
+        with self.expect_section_data(section, responses):
             button.click()
         return self
 
     @step
-    def search_sessions(self, text: str):
-        """Type into the Sessions search and wait for the filtered session list."""
-        with self.page.expect_response(
-            lambda r: r.request.method == "GET"
-            and urlparse(r.url).path.endswith(self.API_PATH + "sessions")
-            and parse_qs(urlparse(r.url).query).get("search") == [text],
-            timeout=30000,
-        ) as sessions:
-            self.sessions_search_input.fill(text)
-        response = sessions.value
-        assert response.ok, f"Session search request failed with HTTP {response.status}"
+    def select_time_period(
+        self, label: str, value: str, section: CLIAnalyticsSection, responses: dict
+    ):
+        """Pick a sidebar TIME PERIOD option; wait for the active section to reload with it.
+
+        ``label`` is the option text, ``value`` the ``time_period`` it must send.
+        """
+        region = self.time_period_region
+        expect(region).to_be_visible(timeout=15000)
+        with self.expect_section_data(section, responses, {"time_period": value}):
+            region.get_by_role("button").first.click()
+            self.page.get_by_role("option", name=label, exact=True).click()
         return self
 
     @step
-    def open_session(self, text: str) -> CLIAnalyticsSessionModal:
-        """Click the Sessions table row containing the text, wait for its detail and return the modal."""
-        row = self.session_row(text)
-        expect(row, f"Session row with '{text}' should be listed").to_be_visible(
-            timeout=15000
-        )
+    def search_sessions(self, text: str) -> dict:
+        """Type into Sessions search and return the successful API response body."""
+        with self._expect_sessions(search=text) as sessions:
+            self.sessions_search_input.fill(text)
+        response = sessions.value
+        assert response.ok, f"Session search request failed with HTTP {response.status}"
+        return response.json()
+
+    @step
+    def filter_sessions_by_framework(self, framework: str) -> dict:
+        """Pick a delivery framework in the Sessions table; return the data it renders."""
+        with self._expect_sessions(framework=framework, page=0) as sessions:
+            self.sessions_framework_select.click()
+            self.page.get_by_role("option", name=framework, exact=True).click()
+        return self._data_of(sessions.value, "Framework-filtered sessions")
+
+    @step
+    def open_sessions_page(self, number: int) -> dict:
+        """Open a 1-based page of the Sessions table; return the data it renders."""
+        with self._expect_sessions(page=number - 1) as sessions:
+            self.table_page_button(number).click()
+        return self._data_of(sessions.value, f"Sessions page {number}")
+
+    def _open_session_row(self, row: Locator, expected_session_id: str | None = None):
+        """Click a Sessions table row; return the modal and the detail data it renders."""
         with self.page.expect_response(
             lambda r: r.request.method == "GET"
             and bool(self.SESSION_DETAIL_PATH.search(urlparse(r.url).path)),
@@ -274,8 +377,34 @@ class CLIAnalyticsPage(BasePage):
             # The first (date) cell is plain text; clicks on links/buttons don't select the row.
             row.get_by_role("cell").first.click()
         response = detail.value
-        assert response.ok, f"Session detail request failed with HTTP {response.status}"
-        return CLIAnalyticsSessionModal(self.page).should_be_visible()
+        data = self._data_of(response, "Session detail")
+        if expected_session_id is not None:
+            actual_session_id = urlparse(response.url).path.rsplit("/", 1)[-1]
+            assert actual_session_id == expected_session_id, (
+                f"Clicked session should request detail for {expected_session_id!r}, "
+                f"got {actual_session_id!r}"
+            )
+        return CLIAnalyticsSessionModal(self.page).should_be_visible(), data
+
+    @step
+    def open_session(
+        self, text: str, expected_session_id: str | None = None
+    ) -> CLIAnalyticsSessionModal:
+        """Click the Sessions table row containing the text, wait for its detail and return the modal."""
+        row = self.session_row(text)
+        expect(row, f"Session row with '{text}' should be listed").to_be_visible(
+            timeout=15000
+        )
+        return self._open_session_row(row, expected_session_id)[0]
+
+    @step
+    def open_session_at(
+        self, index: int, session_id: str
+    ) -> tuple[CLIAnalyticsSessionModal, dict]:
+        """Open the Sessions table row at ``index``; return the modal and its detail data."""
+        row = self.session_rows.nth(index)
+        expect(row).to_be_visible(timeout=15000)
+        return self._open_session_row(row, session_id)
 
     @step
     def filter_by_project(self, project_name: str):

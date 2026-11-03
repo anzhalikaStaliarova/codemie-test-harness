@@ -166,14 +166,13 @@ class LoginPage(BasePage):
         self.fill_username(username)
         self.fill_password(password)
         self.click_submit()
-        # Wait for the full OAuth redirect chain to finish.
-        # Timeout raised to 60 s to accommodate slow auth servers.
+        # Do not let a test navigation race the asynchronous local-auth request.
+        # The previous OpenID-only predicate was already true on /auth/sign-in.
+        self.page.wait_for_url(
+            lambda url: "/auth/sign-in" not in url and "openid-connect" not in url,
+            timeout=60000,
+        )
         self.page.wait_for_load_state("networkidle", timeout=60000)
-        # Ensure the redirect chain has fully landed on the app (not still on the
-        # Keycloak auth server).  networkidle can fire during a multi-hop OAuth
-        # redirect; this guard prevents the AssistantsPage constructor's goto() from
-        # racing with a still-pending server redirect.
-        self.page.wait_for_url(lambda url: "openid-connect" not in url, timeout=60000)
         frontend_url = CredentialsManager.get_parameter("FRONTEND_URL", "")
 
         # Check if we got a 404 error page instead of the app. If so, redirect to frontend_url.

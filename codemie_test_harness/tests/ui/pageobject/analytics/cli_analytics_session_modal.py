@@ -19,6 +19,8 @@ sessions"). Locators verified against the live UI on 2026-10-12
 and the codemie-ui ``SessionModal`` / ``SessionBody`` components.
 """
 
+import re
+
 from playwright.sync_api import Locator, expect
 from reportportal_client import step
 
@@ -63,19 +65,30 @@ class CLIAnalyticsSessionModal(BasePage):
         """Message shown when the session detail came back empty."""
         return self.root.get_by_text(self.NO_DATA_TEXT, exact=True)
 
-    @property
-    def subtitle(self) -> Locator:
-        """The dialog's one-line subtitle: harness/model/repository/branch/framework.
+    def metadata_segment(self, value: str) -> Locator:
+        """Dialog subtitle containing `value` as one complete dot-separated segment."""
+        segment = re.compile(rf"(^|·\s*){re.escape(value)}(\s*·|$)")
+        return self.root.get_by_text(segment).first
 
-        SessionModal.tsx builds it as a single text node, not one element per field:
-        ``[harness_name, model_name, repository, branch, delivery_framework]
-        .filter(Boolean).join(' · ')`` (blank components omitted, not a blank segment).
-        The class combination below (``text-xs text-text-secondary truncate``) is unique
-        to this span in the whole frontend (verified against codemie-ui source), so it
-        cannot match one of SessionTimeline's own ``text-xs text-text-secondary`` spans
-        rendered lower in the same dialog.
+    def metric_label(self, label: str) -> Locator:
+        """Label paragraph of a metric card (Cost, Input, Turns, ...), by exact text.
+
+        The first match is the card: a timeline step detail rendered later reuses
+        some labels (e.g. Cost) in plain grids.
         """
-        return self.root.locator("span.text-xs.text-text-secondary.truncate")
+        return (
+            self.root.locator("p")
+            .filter(has_text=re.compile(rf"^{re.escape(label)}$"))
+            .first
+        )
+
+    def metric_value(self, label: str) -> Locator:
+        """Value paragraph of a metric card: the first <p> after the label's header div."""
+        return self.metric_label(label).locator("xpath=../following-sibling::p[1]")
+
+    def metric_description(self, label: str) -> Locator:
+        """Optional description paragraph of a metric card (e.g. '81.8% ok')."""
+        return self.metric_label(label).locator("xpath=../following-sibling::p[2]")
 
     # ── Actions ──────────────────────────────────────────────────────────────────
 
@@ -117,20 +130,16 @@ class CLIAnalyticsSessionModal(BasePage):
         on the separate Users/Cost tabs, aggregated across sessions, not per-session.
         So it cannot be asserted here or from this flow.
         """
-        expect(
-            self.subtitle, "Session dialog should show its subtitle line"
-        ).to_be_visible(timeout=15000)
-        segments = [s.strip() for s in self.subtitle.inner_text().split("·")]
-        segments = [s for s in segments if s]
         for label, value in (
             ("model", model),
             ("repository", repository),
             ("branch", branch),
         ):
-            assert value in segments, (
-                f"Session dialog subtitle should show its {label} ({value!r}) as its "
-                f"own segment, got segments: {segments}"
-            )
+            expect(
+                self.metadata_segment(value),
+                f"Session dialog subtitle should show its {label} ({value!r}) "
+                "as a complete segment",
+            ).to_be_visible(timeout=15000)
         return self
 
     @step

@@ -14,8 +14,6 @@
 
 """UI coverage for the Analytics > CLI Analytics dashboard (tab opening is smoke)."""
 
-import uuid
-
 import pytest
 
 from codemie_test_harness.tests.ui.pageobject.analytics.analytics_page import (
@@ -31,6 +29,7 @@ from codemie_test_harness.tests.ui.test_data.analytics_test_data import (
 
 @pytest.mark.ui
 @pytest.mark.smoke
+@pytest.mark.prod_regression
 @pytest.mark.cli_analytics
 def test_cli_analytics_tab_opens_from_analytics_page(page):
     """CLI Analytics tab opens from the Analytics page with its default section loaded."""
@@ -41,6 +40,7 @@ def test_cli_analytics_tab_opens_from_analytics_page(page):
 
 
 @pytest.mark.ui
+@pytest.mark.prod_regression
 @pytest.mark.cli_analytics
 def test_cli_analytics_sections_load(page):
     """Every CLI Analytics section loads its data and renders without widget errors."""
@@ -73,30 +73,37 @@ def test_cli_analytics_session_opens_from_sessions_table(page, cli_analytics_ses
 
 @pytest.mark.ui
 @pytest.mark.cli_analytics
-def test_cli_analytics_session_found_by_run_id(page, cli_analytics_session):
-    # @case execute-repeatable-production-release-smoke_TC_003
-    """A seeded session is found by its Run ID (session id) with exact model/
-    repository/branch, and an unrelated id lists no rows.
+def test_cli_analytics_session_search_uses_repository_not_run_id(
+    page, cli_analytics_session
+):
+    # @case execute-repeatable-isolated-integration_TC_003
+    """Sessions search excludes Run ID and returns the exact session for its repository."""
+    assert cli_analytics_session.session_id not in cli_analytics_session.repository
+    assert cli_analytics_session.session_id not in cli_analytics_session.prompt
 
-    The Sessions search box matches prompt, repository or branch, never the session id
-    itself (CLIAnalyticsPage.sessions_search_input / the BE's `search` query param, see
-    cli_analytics_handler.get_sessions); it still finds the session here because the
-    fixture's repository literally embeds the Run ID (f"autotest/{session_id}"), so a
-    search for the Run ID is a real substring match of that field, not a stand-in for one.
-
-    The session's user/developer is not asserted: neither the Sessions table row nor
-    this dialog renders it anywhere (codemie-ui SessionsView.tsx / SessionModal.tsx /
-    SessionBody.tsx) -- it is only ever shown on the separate Users/Cost tabs,
-    aggregated across sessions, see should_show_session_metadata.
-    """
     cli_analytics = CLIAnalyticsPage(page).navigate_to()
     cli_analytics.open_section(CLIAnalyticsSection.SESSIONS)
     cli_analytics.should_have_loaded_section(CLIAnalyticsSection.SESSIONS)
 
-    cli_analytics.search_sessions(cli_analytics_session.session_id)
-    cli_analytics.should_list_exactly_one_session(cli_analytics_session.session_id)
+    run_id_result = cli_analytics.search_sessions(cli_analytics_session.session_id)
+    assert run_id_result["data"]["sessions"] == [], (
+        "Sessions search must not treat trace_id/session_id as searchable metadata"
+    )
+    cli_analytics.should_list_no_sessions()
 
-    session_modal = cli_analytics.open_session(cli_analytics_session.session_id)
+    repository_result = cli_analytics.search_sessions(cli_analytics_session.repository)
+    returned_session_ids = [
+        session["trace_id"] for session in repository_result["data"]["sessions"]
+    ]
+    assert returned_session_ids == [cli_analytics_session.session_id], (
+        "Repository search should return only the seeded session's actual trace_id"
+    )
+    cli_analytics.should_list_exactly_one_session(cli_analytics_session.repository)
+
+    session_modal = cli_analytics.open_session(
+        cli_analytics_session.repository,
+        expected_session_id=cli_analytics_session.session_id,
+    )
     session_modal.should_show_session_metadata(
         model=cli_analytics_session.model,
         repository=cli_analytics_session.repository,
@@ -104,10 +111,6 @@ def test_cli_analytics_session_found_by_run_id(page, cli_analytics_session):
     )
     session_modal.close()
     session_modal.should_be_closed()
-
-    unknown_run_id = f"autotest-cli-{uuid.uuid4().hex[:12]}"
-    cli_analytics.search_sessions(unknown_run_id)
-    cli_analytics.should_list_no_sessions()
 
 
 @pytest.mark.cli_analytics

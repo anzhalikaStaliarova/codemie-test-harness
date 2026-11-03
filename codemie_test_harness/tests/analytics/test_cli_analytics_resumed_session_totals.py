@@ -137,24 +137,33 @@ def _is_fully_rolled_up(detail: dict | None) -> bool:
     )
 
 
+@pytest.fixture(scope="module")
+def isolated_cli_analytics_project(
+    cli_analytics_isolated_environment, create_cli_analytics_project
+):
+    """A disposable project created only after the localhost guard passes."""
+    return create_cli_analytics_project()
+
+
 @pytest.mark.cli_analytics
 @pytest.mark.api
 def test_resumed_session_reports_combined_totals_and_a_distinct_session_stays_separate(
-    analytics_utils, cli_analytics_project, client
+    analytics_utils, isolated_cli_analytics_project, client
 ):
-    # @case execute-repeatable-production-release-smoke_TC_004
+    # @case execute-repeatable-isolated-integration_TC_004
     """One session id is ingested in two batches (an initial run, then a resumed run):
     two prompts/usage requests with non-zero input/output/cache tokens, plus a
     successful and a failing tool call. A second, distinct session id is ingested once
-    in the same project as a not-merged negative control.
+    in the same project and repository as a not-merged negative control.
     """
-    project = cli_analytics_project
+    project = isolated_cli_analytics_project
     developer_name = client.users.about_me().email
     api = CliAnalyticsApi(client)
     base = datetime.now(timezone.utc)
 
     session_id = f"autotest-cli-resumed-{uuid.uuid4().hex[:12]}"
-    repository = f"autotest/{session_id}"
+    repository = f"autotest/resumed-{uuid.uuid4().hex[:12]}"
+    assert session_id not in repository
     tool_calls = [
         {
             "tool_name": "Bash",
@@ -235,7 +244,7 @@ def test_resumed_session_reports_combined_totals_and_a_distinct_session_stays_se
         other_session_id,
         project,
         developer_name,
-        f"autotest/{other_session_id}",
+        repository,
         "Autotest TC-004 unrelated session",
         now=base,
         **_OTHER_SESSION_TOKENS,

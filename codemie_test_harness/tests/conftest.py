@@ -312,7 +312,21 @@ def pytest_collection_modifyitems(config, items):
     1. Parallel runs (-n X) exclude sequential-only tests automatically
     2. Sequential runs include all tests
     3. Users don't need to manually add marker filters
+
+    On Production, CLI Analytics tests that are not marked 'prod_regression' are skipped:
+    they create projects and users or ingest telemetry that cannot be deleted.
     """
+    if EnvironmentResolver.is_production():
+        not_prod_safe = pytest.mark.skip(
+            reason="state-changing CLI Analytics test (creates projects/users or ingests "
+            "undeletable telemetry): not authorized on Production"
+        )
+        for item in items:
+            if item.get_closest_marker("cli_analytics") and not item.get_closest_marker(
+                "prod_regression"
+            ):
+                item.add_marker(not_prod_safe)
+
     # Check if pytest-xdist is active (parallel execution)
     is_xdist_worker = hasattr(config, "workerinput")  # Running as xdist worker
     is_xdist_controller = config.getoption("numprocesses", default=None)  # -n flag used
@@ -359,6 +373,17 @@ def large_file_fixture(tmp_path_factory):
 @pytest.fixture(scope="session")
 def client():
     return get_client()
+
+
+@pytest.fixture(scope="session")
+def cli_analytics_isolated_environment():
+    """Fail before CLI Analytics fixtures mutate a shared or production environment."""
+    environment = EnvironmentResolver.get_environment()
+    if not environment.is_localhost:
+        pytest.fail(
+            "State-changing CLI Analytics tests require an isolated localhost backend; "
+            f"resolved environment is {environment}."
+        )
 
 
 @pytest.fixture(scope="session")

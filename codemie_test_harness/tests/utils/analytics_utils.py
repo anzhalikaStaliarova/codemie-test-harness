@@ -388,10 +388,12 @@ class AnalyticsUtils(BaseUtils):
         """
         user = self.client.users.about_me()
         session_id = f"autotest-cli-{uuid.uuid4().hex[:12]}"
+        repository = f"autotest/repository-{uuid.uuid4().hex[:12]}"
+        prompt = f"Autotest CLI Analytics prompt {uuid.uuid4().hex[:12]}"
         session = CLIAnalyticsTestSession(
             session_id=session_id,
-            repository=f"autotest/{session_id}",
-            prompt=f"Autotest CLI Analytics session {session_id}",
+            repository=repository,
+            prompt=prompt,
             project=project,
             developer_name=user.email,
         )
