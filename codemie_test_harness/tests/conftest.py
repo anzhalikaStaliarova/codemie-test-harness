@@ -86,7 +86,7 @@ from codemie_test_harness.tests.utils.datasource_utils import DataSourceUtils
 from codemie_test_harness.tests.utils.env_resolver import (
     EnvironmentResolver,
 )
-from codemie_test_harness.tests.utils import cleanup_utils
+from codemie_test_harness.tests.utils import cleanup_utils, production_safety
 from codemie_test_harness.tests.utils.gitbud_utils import GitBudUtils
 from codemie_test_harness.tests.utils.gitlab_seed import (
     GITLAB_SEED_FAKE_PNG_UPLOAD,
@@ -277,6 +277,9 @@ def pytest_configure(config):
     except SecretStoreError as e:
         pytest.exit(str(e), returncode=2)
 
+    # Inactive until a read-only test or run turns it on (see production_safety).
+    production_safety.install_transport_guard()
+
     # Reads GET /v1/config once; exits with code 2 before any test when it fails.
     capability_gate.FETCHER = _fetch_capabilities
     capability_gate.pytest_configure(config)
@@ -313,19 +316,21 @@ def pytest_collection_modifyitems(config, items):
     2. Sequential runs include all tests
     3. Users don't need to manually add marker filters
 
-    On Production, CLI Analytics tests that are not marked 'prod_regression' are skipped:
-    they create projects and users or ingest telemetry that cannot be deleted.
+    CLI Analytics tests that are not marked 'prod_regression' create projects and users or
+    ingest telemetry that cannot be deleted. They are skipped unless the stand is known not to
+    be Production or Preview (see production_safety.state_change_refusal).
     """
-    if EnvironmentResolver.is_production():
-        not_prod_safe = pytest.mark.skip(
+    refusal = production_safety.state_change_refusal()
+    if refusal:
+        not_authorized = pytest.mark.skip(
             reason="state-changing CLI Analytics test (creates projects/users or ingests "
-            "undeletable telemetry): not authorized on Production"
+            f"undeletable telemetry) not authorized: {refusal}"
         )
         for item in items:
-            if item.get_closest_marker("cli_analytics") and not item.get_closest_marker(
-                "prod_regression"
-            ):
-                item.add_marker(not_prod_safe)
+            if item.get_closest_marker(
+                "cli_analytics"
+            ) and not production_safety.is_read_only_item(item):
+                item.add_marker(not_authorized)
 
     # Check if pytest-xdist is active (parallel execution)
     is_xdist_worker = hasattr(config, "workerinput")  # Running as xdist worker
@@ -356,6 +361,27 @@ def pytest_collection_modifyitems(config, items):
                 )
 
 
+def pytest_collection_finish(session):
+    """Decide, from the final selection, whether the whole run is read-only."""
+    if production_safety.configure_run(session.items):
+        logger.info(
+            "Read-only run: state-changing calls to the stand are refused and the session "
+            "hooks neither create nor delete anything."
+        )
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_setup(item):
+    with production_safety.read_only_test(item):
+        yield
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    with production_safety.read_only_test(item):
+        yield
+
+
 @pytest.fixture(scope="session")
 def large_file_fixture(tmp_path_factory):
     """Path to a generated >100MB text file (never committed).
@@ -376,13 +402,20 @@ def client():
 
 
 @pytest.fixture(scope="session")
-def cli_analytics_isolated_environment():
-    """Fail before CLI Analytics fixtures mutate a shared or production environment."""
-    environment = EnvironmentResolver.get_environment()
-    if not environment.is_localhost:
-        pytest.fail(
-            "State-changing CLI Analytics tests require an isolated localhost backend; "
-            f"resolved environment is {environment}."
+def cli_analytics_state_changes_allowed():
+    """Fail before a CLI Analytics fixture creates data on a shared/read-only stand."""
+    refusal = production_safety.state_change_refusal()
+    if refusal:
+        pytest.fail(f"State-changing CLI Analytics fixture refused: {refusal}")
+
+
+@pytest.fixture(scope="session")
+def cli_analytics_isolated_environment(cli_analytics_state_changes_allowed):
+    """Require a stand declared disposable before synthetic telemetry changes its totals."""
+    if not production_safety.disposable_environment_declared():
+        pytest.skip(
+            "needs an isolated stand declared with "
+            f"{production_safety.DISPOSABLE_ENVIRONMENT}=true: the test changes its totals"
         )
 
 
@@ -767,7 +800,10 @@ def categories_utils(client):
 
 @pytest.fixture(scope="session", autouse=True)
 def ensure_test_project(admin_utils):
-    """Ensure the test project exists before running tests"""
+    """Ensure the test project exists before running tests; a read-only run creates nothing."""
+    if production_safety.is_read_only_run():
+        logger.info(f"Read-only run: test project '{PROJECT}' is not created.")
+        return
     logger.info(f"Ensuring test project '{PROJECT}' exists...")
     filtered_projects = admin_utils.list_projects(PROJECT)
     if PROJECT not in filtered_projects:
@@ -2603,6 +2639,12 @@ def pytest_sessionfinish(session):
     for that.
     """
     if CredentialsManager.get_parameter("CLEANUP_DATA", "true").lower() != "true":
+        return
+    if session.config.option.collectonly or getattr(session, "testscollected", 0) == 0:
+        logger.info("Session cleanup skipped: no test body executed.")
+        return
+    if production_safety.is_read_only_run():
+        logger.info("Read-only run: session cleanup skipped, nothing was created.")
         return
 
     logger.info("Starting session cleanup...")

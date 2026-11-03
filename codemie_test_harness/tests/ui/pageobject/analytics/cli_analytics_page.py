@@ -28,7 +28,7 @@ re-mounted on every section switch, which re-fetches that section's data.
 
 import re
 from contextlib import ExitStack
-from typing import NamedTuple
+from typing import Callable, NamedTuple, TypeVar
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import Locator, expect
@@ -44,6 +44,8 @@ from codemie_test_harness.tests.ui.pageobject.base_page import BasePage
 from codemie_test_harness.tests.ui.test_data.analytics_test_data import (
     CLIAnalyticsSection,
 )
+
+T = TypeVar("T")
 
 
 class SectionSpec(NamedTuple):
@@ -85,6 +87,8 @@ class CLIAnalyticsPage(BasePage):
     }
     DEFAULT_SECTION = CLIAnalyticsSection.OVERVIEW
     SECTION_RESPONSE_TIMEOUT_MS = 120_000
+    RENDER_TIMEOUT_MS = 15_000
+    RENDER_POLL_MS = 250
     # The section buttons expose no aria-pressed/aria-selected; the active one is
     # only distinguishable by this background class.
     ACTIVE_SECTION_CLASS = re.compile(r"\bbg-surface-interactive-active\b")
@@ -305,6 +309,21 @@ class CLIAnalyticsPage(BasePage):
             })"""
         )
 
+    def rendered_when(self, read: Callable[[], T], expected: T) -> T:
+        """What ``read`` returns once the page renders ``expected``, or after the timeout.
+
+        React re-renders after the response that a wait resolves on; reading the DOM once
+        could see the previous figures. The caller asserts the returned value, so a timeout
+        fails with what was last rendered.
+        """
+        rendered = read()
+        waited = 0
+        while rendered != expected and waited < self.RENDER_TIMEOUT_MS:
+            self.page.wait_for_timeout(self.RENDER_POLL_MS)
+            waited += self.RENDER_POLL_MS
+            rendered = read()
+        return rendered
+
     @step
     def navigate_to(self, responses: dict | None = None):
         """Open CLI Analytics by URL and wait for the default section data.
@@ -510,10 +529,13 @@ class CLIAnalyticsPage(BasePage):
 
     @step
     def should_list_exactly_one_session(self, text: str):
-        """Assert the Sessions table lists exactly one row matching `text`."""
+        """Assert the Sessions table lists one row, and that row matches `text`."""
+        expect(
+            self.session_rows, "Sessions table should list exactly one row"
+        ).to_have_count(1, timeout=15000)
         expect(
             self.session_row(text),
-            f"Sessions table should list exactly one row matching '{text}'",
+            f"The only Sessions table row should match '{text}'",
         ).to_have_count(1, timeout=15000)
         return self
 

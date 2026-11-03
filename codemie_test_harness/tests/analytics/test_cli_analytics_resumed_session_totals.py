@@ -128,6 +128,10 @@ def _fetch_detail(api: CliAnalyticsApi, trace_id: str) -> dict | None:
     return response.json()["data"]
 
 
+def _tokens(detail: dict) -> dict:
+    return {k: detail.get(k) for k in _BATCH_1_TOKENS}
+
+
 def _is_fully_rolled_up(detail: dict | None) -> bool:
     return (
         detail is not None
@@ -141,7 +145,7 @@ def _is_fully_rolled_up(detail: dict | None) -> bool:
 def isolated_cli_analytics_project(
     cli_analytics_isolated_environment, create_cli_analytics_project
 ):
-    """A disposable project created only after the localhost guard passes."""
+    """A disposable project created only on a stand declared disposable."""
     return create_cli_analytics_project()
 
 
@@ -192,6 +196,20 @@ def test_resumed_session_reports_combined_totals_and_a_distinct_session_stays_se
         **_BATCH_1_TOKENS,
     )
     analytics_utils.ingest_cli_event_hooks(batch1, project=project)
+
+    # The initial run must be rolled up on its own before the resume, so the final totals
+    # prove that a later batch is added to an existing session, not ingested together with it.
+    initial = poll_until(
+        lambda: _fetch_detail(api, session_id),
+        lambda d: d is not None and _tokens(d) == _BATCH_1_TOKENS,
+        timeout=CLI_SESSION_ROLLUP_TIMEOUT,
+        interval=5,
+    )
+    assert_that(
+        _tokens(initial) if initial else None,
+        equal_to(_BATCH_1_TOKENS),
+        f"initial run of {session_id!r} rolled up alone, last seen detail: {initial}",
+    )
 
     # Batch 2: the resumed run, 60 s later, closes the session and reports the tool calls.
     resumed_at = base + _RESUME_OFFSET
@@ -309,19 +327,16 @@ def test_resumed_session_reports_combined_totals_and_a_distinct_session_stays_se
         f"session duration, detail: {detail}",
     )
 
-    # List API: the resumed session is one row with the same combined totals.
-    sessions = analytics_utils.get_cli_analytics_sessions(
-        projects=project
-    ).data.sessions
-    by_trace_id = {
-        s.trace_id: s for s in sessions if s.trace_id in (session_id, other_session_id)
-    }
+    # List API: the project holds exactly the two seeded sessions, the resumed one as a
+    # single row with the combined totals.
+    listing = analytics_utils.get_cli_analytics_sessions(projects=project).data
+    listed_ids = sorted(s.trace_id for s in listing.sessions)
     assert_that(
-        sorted(by_trace_id),
-        equal_to(sorted((session_id, other_session_id))),
-        f"sessions list for project {project!r} must list both seeded sessions exactly once each, "
-        f"got trace_ids: {sorted(s.trace_id for s in sessions)}",
+        (listing.total, listed_ids),
+        equal_to((2, sorted((session_id, other_session_id)))),
+        f"sessions list for project {project!r}: each seeded session exactly once, nothing else",
     )
+    by_trace_id = {s.trace_id: s for s in listing.sessions}
     listed = by_trace_id[session_id]
     assert_that(
         {

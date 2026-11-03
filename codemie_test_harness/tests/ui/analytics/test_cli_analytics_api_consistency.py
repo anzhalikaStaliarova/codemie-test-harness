@@ -18,14 +18,16 @@ Every test captures the JSON of the request the dashboard itself fired and asser
 the figures on screen against it, formatted as the UI formats them (codemie-ui
 ``OverviewView``, ``SessionsView``, ``UsersView``, ``SessionBody``,
 ``formatCliAnalyticsCost``, ``formatTokens``). Live Production data changes between
-any two requests, so nothing is compared across separate requests except invariants
-that hold under concurrent ingestion. Safe on Production: no data is created.
+any two requests, so nothing is compared across separate requests. Every check waits for
+the page to render the captured figures: React updates the DOM after the response
+arrives. Safe on Production: no data is created.
 
 Not covered: Date / Last Active / Duration / Started cells (browser-local time and
 duration formatting) and charts (canvas).
 """
 
 import math
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from urllib.parse import parse_qs, urlparse
 
@@ -160,8 +162,14 @@ def _rendered(rows: list[dict[str, str]], columns) -> list[dict[str, str]]:
 def _assert_sessions_table(cli_analytics: CLIAnalyticsPage, data: dict):
     expected = [_session_row_text(s) for s in data["sessions"]]
     assert_that(expected, has_length(greater_than(0)), "sessions to render")
-    rendered = cli_analytics.read_table(cli_analytics.session_rows)
-    assert_that(_rendered(rendered, expected[0]), equal_to(expected))
+    _assert_table(cli_analytics, cli_analytics.session_rows, expected)
+
+
+def _assert_table(cli_analytics: CLIAnalyticsPage, rows, expected: list[dict]):
+    rendered = cli_analytics.rendered_when(
+        lambda: _rendered(cli_analytics.read_table(rows), expected[0]), expected
+    )
+    assert_that(rendered, equal_to(expected))
 
 
 def _headline_kpis(k: dict) -> dict[str, tuple[str, str | None]]:
@@ -206,6 +214,13 @@ def _all_kpis(k: dict) -> dict[str, tuple[str, str | None]]:
     }
 
 
+def _assert_kpis(cli_analytics: CLIAnalyticsPage, expected: dict):
+    rendered = cli_analytics.rendered_when(
+        lambda: _read_kpis(cli_analytics, expected), expected
+    )
+    assert_that(rendered, equal_to(expected))
+
+
 def _read_kpis(cli_analytics: CLIAnalyticsPage, expected: dict) -> dict:
     return {
         label: (
@@ -244,7 +259,7 @@ def test_overview_kpi_cards_render_overview_api_figures(overview):
     cli_analytics, responses = overview
     expected = _all_kpis(responses["overview"]["kpis"])
 
-    assert_that(_read_kpis(cli_analytics, expected), equal_to(expected))
+    _assert_kpis(cli_analytics, expected)
 
 
 def test_time_period_filter_reloads_overview_for_selected_period(overview):
@@ -261,8 +276,7 @@ def test_time_period_filter_reloads_overview_for_selected_period(overview):
         equal_to(["last_7_days"]),
         "time period in the URL",
     )
-    expected = _headline_kpis(responses["overview"]["kpis"])
-    assert_that(_read_kpis(cli_analytics, expected), equal_to(expected))
+    _assert_kpis(cli_analytics, _headline_kpis(responses["overview"]["kpis"]))
 
 
 def test_sessions_table_renders_sessions_api_rows(sessions_section):
@@ -274,8 +288,8 @@ def test_sessions_table_renders_sessions_api_rows(sessions_section):
     _assert_sessions_table(cli_analytics, data)
 
 
-def test_sessions_pagination_renders_next_older_page(sessions_section):
-    """Page 2 requests page=1 and lists older sessions than page 1."""
+def test_sessions_pagination_renders_second_page(sessions_section):
+    """Page 2 requests page=1 of 20, newest first, and renders exactly the rows it returned."""
     cli_analytics, responses = sessions_section
     first = responses["sessions"]
     if first["total"] <= SESSIONS_PER_PAGE:
@@ -283,10 +297,18 @@ def test_sessions_pagination_renders_next_older_page(sessions_section):
 
     second = cli_analytics.open_sessions_page(2)
 
-    assert_that(second["sessions"], has_length(greater_than(0)), "page 2 rows")
+    assert_that((second["page"], second["per_page"]), equal_to((1, SESSIONS_PER_PAGE)))
+    assert_that(
+        second["sessions"],
+        has_length(min(SESSIONS_PER_PAGE, second["total"] - SESSIONS_PER_PAGE)),
+        "page 2 rows",
+    )
+    starts = [
+        datetime.fromisoformat(s["start_time"].replace("Z", "+00:00"))
+        for s in second["sessions"]
+    ]
+    assert_that(starts, equal_to(sorted(starts, reverse=True)), "newest first")
     _assert_sessions_table(cli_analytics, second)
-    # Holds under concurrent ingestion: new sessions only push rows down.
-    assert second["sessions"][0]["start_time"] <= first["sessions"][-1]["start_time"]
 
 
 def test_sessions_framework_filter_lists_only_that_framework(sessions_section):
@@ -334,9 +356,12 @@ def test_session_modal_renders_session_detail_api(sessions_section):
         "Agents": DASH if s["agent_count"] is None else str(s["agent_count"]),
         "Skills": DASH if s["skill_count"] is None else str(s["skill_count"]),
     }
-    rendered = {
-        label: modal.metric_value(label).inner_text().strip() for label in expected
-    }
+    rendered = cli_analytics.rendered_when(
+        lambda: {
+            label: modal.metric_value(label).inner_text().strip() for label in expected
+        },
+        expected,
+    )
     assert_that(rendered, equal_to(expected))
 
     ok_label = modal.metric_description("Tool calls")
@@ -364,7 +389,8 @@ def test_session_modal_renders_session_detail_api(sessions_section):
         equal_to(1),
         f"subtitle {subtitle!r}",
     )
-    for field in ("repository", "branch", "delivery_framework", "turns"):
+    # Identity only: turns and token figures of a live session change between the requests.
+    for field in ("repository", "branch", "delivery_framework"):
         assert_that(s[field], equal_to(row[field]), f"detail vs clicked row: {field}")
 
     modal.close()
@@ -383,5 +409,4 @@ def test_users_table_renders_users_api_rows(overview):
 
     assert_that(table["rows"], has_length(min(USERS_PER_PAGE, table["total_count"])))
     expected = [_user_row_text(u) for u in table["rows"]]
-    rendered = cli_analytics.read_table(cli_analytics.users_data_rows)
-    assert_that(_rendered(rendered, expected[0]), equal_to(expected))
+    _assert_table(cli_analytics, cli_analytics.users_data_rows, expected)

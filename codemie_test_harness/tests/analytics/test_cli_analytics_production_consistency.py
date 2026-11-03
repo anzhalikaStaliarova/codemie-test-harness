@@ -54,9 +54,9 @@ TOOL_USAGE_LIMIT = 20
 DETAIL_SAMPLE = 10
 MONEY = {"rel": 1e-6, "abs": 0.01}
 TOOL_SUCCESS_DEFECT = (
-    "EPMCDME-16741: session detail counts tool calls from tool_facts_daily but successes "
-    "from TOOL/EXEC spans, so a session without spans reports 0% while every aggregate "
-    "of the same session reports its real success rate"
+    "known defect: session detail counts tool calls from tool_facts_daily but successes "
+    "from at most 20 TOOL/EXEC spans, so it reports a lower success rate than every "
+    "aggregate of the same session"
 )
 # Fields the session list row and the detail compute from the same facts. api_call_count and
 # ctx_per_call are list-only (the detail model leaves them at 0) and user_email holds the
@@ -100,6 +100,30 @@ def _approx(value: float):
     return pytest.approx(value, **MONEY)
 
 
+def _read_all_rows(cli_api, endpoint: str, **params) -> dict:
+    """Every row of a paged endpoint, read page by page, with the total it reports."""
+    rows, page = [], 0
+    while True:
+        data = cli_api.get_data(endpoint, page=page, per_page=MAX_PER_PAGE, **params)
+        total = data.get("pagination", data)["total_count"]
+        rows.extend(data["rows"])
+        if len(rows) >= total or not data["rows"]:
+            break
+        page += 1
+    assert_that(len(rows), equal_to(total), f"{endpoint} rows read page by page")
+    return {"rows": rows, "total_count": total}
+
+
+def _top_repository(snapshot) -> dict:
+    """The attributed repository with the most sessions; skips when there is none."""
+    repo = next(
+        (r for r in snapshot["repositories_by_name"]["rows"] if r["repository"]), None
+    )
+    if repo is None:
+        pytest.skip("no session in the window reports a repository")
+    return repo
+
+
 @pytest.fixture(scope="module")
 def cli_api(client, cli_analytics_enabled) -> CliAnalyticsApi:
     return CliAnalyticsApi(client)
@@ -132,13 +156,11 @@ def snapshot(cli_api, window) -> dict:
             "frameworks",
         )
     }
-    data["users"] = cli_api.get_data("users", page=0, per_page=MAX_PER_PAGE, **window)
+    data["users"] = _read_all_rows(cli_api, "users", **window)
     data["repositories"] = cli_api.get_data(
         "repositories", include_branches=True, **window
     )
-    data["repositories_by_name"] = cli_api.get_data(
-        "repositories", page=0, per_page=MAX_PER_PAGE, **window
-    )
+    data["repositories_by_name"] = _read_all_rows(cli_api, "repositories", **window)
     data["sessions"] = cli_api.get_data(
         "sessions", page=0, per_page=MAX_PER_PAGE, **window
     )
@@ -425,12 +447,13 @@ def test_session_detail_matches_its_list_row(cli_api, window):
         )
 
 
-@pytest.mark.xfail(reason=TOOL_SUCCESS_DEFECT, strict=False)
 def test_session_detail_tool_success_matches_its_aggregate(cli_api, window):
     """A session's detail reports the tool calls and success rate the aggregates count for it.
 
     The session is isolated in the aggregates by a one-second window at its start, its user
-    and its repository; only sessions that are alone in that slice are compared.
+    and its repository; only sessions that are alone in that slice are compared. Only the
+    known defect is expected to fail: the same call count with a lower detail success rate.
+    Any other difference, an error status or a wrong count fails the test.
     """
     rows = cli_api.get_data("sessions", sort_by="cost_usd", per_page=30, **window)[
         "sessions"
@@ -460,9 +483,13 @@ def test_session_detail_tool_success_matches_its_aggregate(cli_api, window):
         if len(compared) == DETAIL_SAMPLE:
             break
 
-    assert_that(len(compared), greater_than(0), "sessions isolated in the aggregates")
+    if not compared:
+        pytest.skip("no session with tool calls is alone in its aggregate slice")
     mismatched = [c for c in compared if c[1] != c[2]]
-    assert_that(mismatched, equal_to([]), "(trace_id, detail, aggregate) of mismatches")
+    unexpected = [c for c in mismatched if c[1][0] != c[2][0] or not c[1][1] < c[2][1]]
+    assert_that(unexpected, equal_to([]), "(trace_id, detail, aggregate) of mismatches")
+    if mismatched:
+        pytest.xfail(f"{TOOL_SUCCESS_DEFECT}: {mismatched}")
 
 
 def test_unknown_session_returns_404(cli_api):
@@ -504,7 +531,7 @@ def test_repository_filter_returns_exactly_that_repository_row(
     cli_api, window, snapshot
 ):
     """Filtered by the top repository, Overview and Sessions report exactly its row."""
-    repo = next(r for r in snapshot["repositories_by_name"]["rows"] if r["repository"])
+    repo = _top_repository(snapshot)
     params = {**window, "repositories": repo["repository"]}
 
     kpis = cli_api.get_data("overview", **params)["kpis"]
@@ -527,9 +554,10 @@ def test_branch_filter_returns_that_branchs_sessions(
     cli_api, window, snapshot, all_sessions
 ):
     """branch= returns exactly the sessions on that branch, as many as its repository rows count."""
-    branch, expected = Counter(
-        s["branch"] for s in all_sessions if s["branch"]
-    ).most_common(1)[0]
+    branches = Counter(s["branch"] for s in all_sessions if s["branch"])
+    if not branches:
+        pytest.skip("no session in the window reports a branch")
+    branch, expected = branches.most_common(1)[0]
     branch_rows = [
         b
         for r in snapshot["repositories"]["rows"]
@@ -567,8 +595,7 @@ def test_search_matches_prompt_repository_or_branch(
 ):
     """search= keeps exactly the sessions whose prompt, repository or branch contains the term,
     case-insensitively."""
-    top = next(r for r in snapshot["repositories_by_name"]["rows"] if r["repository"])
-    term = top["repository"].split("/")[-1].upper()
+    term = _top_repository(snapshot)["repository"].split("/")[-1].upper()
     lowered = term.lower()
     expected = sorted(
         s["trace_id"]
