@@ -24,6 +24,7 @@ import re
 from playwright.sync_api import Locator, expect
 from reportportal_client import step
 
+from codemie_test_harness.tests.ui.pageobject.analytics import metric_card_locators
 from codemie_test_harness.tests.ui.pageobject.base_page import BasePage
 
 
@@ -76,19 +77,15 @@ class CLIAnalyticsSessionModal(BasePage):
         The first match is the card: a timeline step detail rendered later reuses
         some labels (e.g. Cost) in plain grids.
         """
-        return (
-            self.root.locator("p")
-            .filter(has_text=re.compile(rf"^{re.escape(label)}$"))
-            .first
-        )
+        return metric_card_locators.metric_label(self.root, label)
 
     def metric_value(self, label: str) -> Locator:
         """Value paragraph of a metric card: the first <p> after the label's header div."""
-        return self.metric_label(label).locator("xpath=../following-sibling::p[1]")
+        return metric_card_locators.metric_value(self.root, label)
 
     def metric_description(self, label: str) -> Locator:
         """Optional description paragraph of a metric card (e.g. '81.8% ok')."""
-        return self.metric_label(label).locator("xpath=../following-sibling::p[2]")
+        return metric_card_locators.metric_description(self.root, label)
 
     # ── Actions ──────────────────────────────────────────────────────────────────
 

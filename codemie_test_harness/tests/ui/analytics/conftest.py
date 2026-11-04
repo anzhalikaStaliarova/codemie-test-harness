@@ -34,20 +34,22 @@ from codemie_test_harness.tests.utils.cli_analytics_api_utils import (
 
 @pytest.fixture(scope="session")
 def cli_analytics_session(
-    cli_analytics_isolated_environment, analytics_utils, project_utils
+    cli_analytics_isolated_environment, analytics_utils, admin_utils, project_utils
 ) -> CLIAnalyticsTestSession:
     """A CLI Analytics session of the test user, seeded through the ingest API.
 
-    The ingest API discards data of projects with CLI analytics disabled, so the session is
-    sent to an isolated project that is enabled atomically when created. A new session is
-    created once per pytest session (per xdist worker). The ingested data cannot be deleted
-    (see AnalyticsUtils.create_cli_session); the project itself is removed at the end, a
-    failure is an error of the run.
+    The ingest API discards data of projects with CLI analytics disabled, so the project is
+    first created by the admin user and then enabled through the sender's project endpoint.
+    This preserves the non-member gate covered by CLI Analytics project-gate scenarios. A
+    new session is created once per pytest session (per xdist worker). The ingested data
+    cannot be deleted (see AnalyticsUtils.create_cli_session); the project itself is
+    removed at the end, a failure is an error of the run.
     """
     project_data = get_project_create_data()
     project = project_data["name"]
     try:
-        project_utils.create_project(**project_data, cli_analytics_enabled=True)
+        admin_utils.create_project(project)
+        project_utils.update_project(project, cli_analytics_enabled=True)
         yield analytics_utils.create_cli_session(project=project)
     finally:
         delete_projects_strict(project_utils, [project])

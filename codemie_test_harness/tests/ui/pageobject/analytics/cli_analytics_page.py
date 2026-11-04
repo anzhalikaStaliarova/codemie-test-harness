@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urlparse
 from playwright.sync_api import Locator, expect
 from reportportal_client import step
 
+from codemie_test_harness.tests.ui.pageobject.analytics import metric_card_locators
 from codemie_test_harness.tests.ui.pageobject.analytics.cli_analytics_session_modal import (
     CLIAnalyticsSessionModal,
 )
@@ -192,19 +193,15 @@ class CLIAnalyticsPage(BasePage):
         Cards render no data-testid: <p>label</p> (in a header div), then the value
         <p> and an optional description <p> as siblings of that header.
         """
-        return (
-            self.section_panel.locator("p")
-            .filter(has_text=re.compile(rf"^{re.escape(label)}$"))
-            .first
-        )
+        return metric_card_locators.metric_label(self.section_panel, label)
 
     def metric_value(self, label: str) -> Locator:
         """Value paragraph of a metric card in the active section."""
-        return self.metric_label(label).locator("xpath=../following-sibling::p[1]")
+        return metric_card_locators.metric_value(self.section_panel, label)
 
     def metric_description(self, label: str) -> Locator:
         """Description paragraph of a metric card in the active section."""
-        return self.metric_label(label).locator("xpath=../following-sibling::p[2]")
+        return metric_card_locators.metric_description(self.section_panel, label)
 
     @property
     def time_period_region(self) -> Locator:

@@ -59,14 +59,14 @@ USERS_PER_PAGE = 50
 def _to_fixed(x: float, digits: int) -> str:
     """``Number.prototype.toFixed``: exact binary value, ties away from zero."""
     q = Decimal(abs(x)).quantize(Decimal(1).scaleb(-digits), rounding=ROUND_HALF_UP)
-    return f"{'-' if x < 0 and q else ''}{q}"
+    return f"{'-' if x < 0 else ''}{q}"
 
 
 def _locale(n: float, decimals: int | None = None) -> str:
     """``toLocaleString('en-US')`` for integers, or with fixed fraction digits."""
     if decimals is None:
         return f"{int(n):,}"
-    q = Decimal(repr(n)).quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
+    q = Decimal(n).quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
     return f"{q:,}"
 
 

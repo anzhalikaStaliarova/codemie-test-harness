@@ -403,10 +403,10 @@ def client():
 
 @pytest.fixture(scope="session")
 def cli_analytics_state_changes_allowed():
-    """Fail before a CLI Analytics fixture creates data on a shared/read-only stand."""
+    """Skip before a CLI Analytics fixture creates data on a shared/read-only stand."""
     refusal = production_safety.state_change_refusal()
     if refusal:
-        pytest.fail(f"State-changing CLI Analytics fixture refused: {refusal}")
+        pytest.skip(f"State-changing CLI Analytics fixture refused: {refusal}")
 
 
 @pytest.fixture(scope="session")

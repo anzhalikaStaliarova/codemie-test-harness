@@ -405,7 +405,18 @@ def test_sessions_are_sorted_and_inside_the_window(cli_api, window, sort_by):
     assert_that(len(sessions), greater_than(0))
 
     keys = [s[sort_by] for s in sessions]
-    assert_that(keys, equal_to(sorted(keys, reverse=True)), f"sorted by {sort_by}")
+    non_null_keys = [key for key in keys if key is not None]
+    assert_that(
+        non_null_keys,
+        equal_to(sorted(non_null_keys, reverse=True)),
+        f"non-null {sort_by} values sorted DESC: {keys}",
+    )
+    if len(non_null_keys) != len(keys):
+        assert_that(
+            keys,
+            equal_to([*non_null_keys, *([None] * (len(keys) - len(non_null_keys)))]),
+            f"null {sort_by} values trail sortable rows: {keys}",
+        )
     end = _ts(window["end_date"])
     for s in sessions:
         assert _ts(s["start_time"]) <= end, s["trace_id"]
