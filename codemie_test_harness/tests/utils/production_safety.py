@@ -48,6 +48,7 @@ DISPOSABLE_ENVIRONMENT = "CLI_ANALYTICS_DISPOSABLE_ENVIRONMENT"
 _read_only_run = False
 _guarded_tests = 0
 _original_send = requests.Session.send
+_transport_guard_installed = False
 
 
 class ReadOnlyViolation(RuntimeError):
@@ -98,7 +99,7 @@ def configure_run(items) -> bool:
     selected = list(items)
     runnable = [item for item in selected if not any(item.iter_markers(name="skip"))]
     _read_only_run = _setting_enabled(READ_ONLY_RUN) or (
-        bool(selected) and all(is_read_only_item(item) for item in runnable)
+        bool(runnable) and all(is_read_only_item(item) for item in runnable)
     )
     return _read_only_run
 
@@ -136,8 +137,11 @@ def _guarded_send(session, request, **kwargs):
 
 
 def install_transport_guard() -> None:
-    """Route every `requests` call (SDK, raw helpers, cleanup) through the guard."""
-    requests.Session.send = _guarded_send
+    """Install the requests guard once, only for runs that collect CLI Analytics tests."""
+    global _transport_guard_installed
+    if not _transport_guard_installed:
+        requests.Session.send = _guarded_send
+        _transport_guard_installed = True
 
 
 @contextmanager

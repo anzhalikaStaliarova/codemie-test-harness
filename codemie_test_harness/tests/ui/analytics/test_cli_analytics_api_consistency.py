@@ -92,16 +92,19 @@ def _cost(v: float) -> str:
     """``formatCliAnalyticsCost``."""
     if not v:
         return "$0.00"
-    if v < 0.01:
-        return f"${_to_fixed(v, 4)}"
-    if v < 100:
-        return f"${_to_fixed(v, 2)}"
-    return f"${_locale(_js_round(v))}"
+    magnitude = abs(v)
+    sign = "-" if v < 0 else ""
+    if magnitude < 0.01:
+        return f"{sign}${_to_fixed(magnitude, 4)}"
+    if magnitude < 100:
+        return f"{sign}${_to_fixed(magnitude, 2)}"
+    return f"{sign}${_locale(_js_round(magnitude))}"
 
 
 def _currency(v: float) -> str:
     """``MetricFormat.CURRENCY``."""
-    return f"${_locale(v, 2)}"
+    sign = "-" if v < 0 else ""
+    return f"{sign}${_locale(abs(v), 2)}"
 
 
 def _tool_success(rate: float | None, calls: int | None) -> str:

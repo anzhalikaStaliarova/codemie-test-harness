@@ -161,6 +161,11 @@ class LoginPage(BasePage):
     @step
     def login(self, username: str, password: str):
         """Complete login process with username and password."""
+
+        def auth_path_finished(url: str) -> bool:
+            path = urlparse(url).path
+            return "/auth/sign-in" not in path and "openid-connect" not in path
+
         self.page.wait_for_load_state("networkidle", timeout=60000)
         self.expand_email_password_form()
         self.fill_username(username)
@@ -168,10 +173,7 @@ class LoginPage(BasePage):
         self.click_submit()
         # Do not let a test navigation race the asynchronous local-auth request.
         # The previous OpenID-only predicate was already true on /auth/sign-in.
-        self.page.wait_for_url(
-            lambda url: "/auth/sign-in" not in url and "openid-connect" not in url,
-            timeout=60000,
-        )
+        self.page.wait_for_url(auth_path_finished, timeout=60000)
         self.page.wait_for_load_state("networkidle", timeout=60000)
         frontend_url = CredentialsManager.get_parameter("FRONTEND_URL", "")
 

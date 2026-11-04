@@ -277,9 +277,6 @@ def pytest_configure(config):
     except SecretStoreError as e:
         pytest.exit(str(e), returncode=2)
 
-    # Inactive until a read-only test or run turns it on (see production_safety).
-    production_safety.install_transport_guard()
-
     # Reads GET /v1/config once; exits with code 2 before any test when it fails.
     capability_gate.FETCHER = _fetch_capabilities
     capability_gate.pytest_configure(config)
@@ -363,6 +360,8 @@ def pytest_collection_modifyitems(config, items):
 
 def pytest_collection_finish(session):
     """Decide, from the final selection, whether the whole run is read-only."""
+    if any(item.get_closest_marker("cli_analytics") for item in session.items):
+        production_safety.install_transport_guard()
     if production_safety.configure_run(session.items):
         logger.info(
             "Read-only run: state-changing calls to the stand are refused and the session "

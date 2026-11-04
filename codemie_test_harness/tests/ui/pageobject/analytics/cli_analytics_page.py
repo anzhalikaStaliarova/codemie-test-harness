@@ -371,7 +371,7 @@ class CLIAnalyticsPage(BasePage):
     @step
     def filter_sessions_by_framework(self, framework: str) -> dict:
         """Pick a delivery framework in the Sessions table; return the data it renders."""
-        with self._expect_sessions(framework=framework, page=0) as sessions:
+        with self._expect_sessions(framework=framework) as sessions:
             self.sessions_framework_select.click()
             self.page.get_by_role("option", name=framework, exact=True).click()
         return self._data_of(sessions.value, "Framework-filtered sessions")
