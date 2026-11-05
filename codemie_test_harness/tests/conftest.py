@@ -360,7 +360,7 @@ def pytest_collection_modifyitems(config, items):
 
 def pytest_collection_finish(session):
     """Decide, from the final selection, whether the whole run is read-only."""
-    if any(item.get_closest_marker("cli_analytics") for item in session.items):
+    if production_safety.transport_guard_required(session.items):
         production_safety.install_transport_guard()
     if production_safety.configure_run(session.items):
         logger.info(

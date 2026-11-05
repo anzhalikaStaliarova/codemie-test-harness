@@ -95,16 +95,16 @@ def _cost(v: float) -> str:
     magnitude = abs(v)
     sign = "-" if v < 0 else ""
     if magnitude < 0.01:
-        return f"{sign}${_to_fixed(magnitude, 4)}"
+        return f"${sign}{_to_fixed(magnitude, 4)}"
     if magnitude < 100:
-        return f"{sign}${_to_fixed(magnitude, 2)}"
-    return f"{sign}${_locale(_js_round(magnitude))}"
+        return f"${sign}{_to_fixed(magnitude, 2)}"
+    return f"${sign}{_locale(_js_round(magnitude))}"
 
 
 def _currency(v: float) -> str:
     """``MetricFormat.CURRENCY``."""
-    sign = "-" if v < 0 else ""
-    return f"{sign}${_locale(abs(v), 2)}"
+    sign = "-" if math.copysign(1, v) < 0 else ""
+    return f"${sign}{_locale(abs(v), 2)}"
 
 
 def _tool_success(rate: float | None, calls: int | None) -> str:

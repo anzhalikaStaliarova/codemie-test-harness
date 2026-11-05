@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urlparse
 from playwright.sync_api import Locator, expect
 from reportportal_client import step
 
+from codemie_test_harness.tests.utils.credentials_manager import CredentialsManager
 from codemie_test_harness.tests.ui.pageobject.analytics import metric_card_locators
 from codemie_test_harness.tests.ui.pageobject.analytics.cli_analytics_session_modal import (
     CLIAnalyticsSessionModal,
@@ -233,9 +234,13 @@ class CLIAnalyticsPage(BasePage):
     def _is_api_response(self, response, endpoint: str, params: dict | None) -> bool:
         """GET response of ``<API_PATH><endpoint>`` whose query has every given param."""
         url = urlparse(response.url)
-        if response.request.method != "GET" or not url.path.endswith(
-            self.API_PATH + endpoint
-        ):
+        api_domain = CredentialsManager.get_parameter("CODEMIE_API_DOMAIN", "") or ""
+        api_base_path = urlparse(api_domain).path.rstrip("/")
+        expected_suffix = f"{api_base_path}{self.API_PATH}{endpoint}"
+        if response.request.method != "GET" or not url.path.endswith(expected_suffix):
+            return False
+        prefix = url.path[: -len(expected_suffix)]
+        if prefix.rstrip("/"):
             return False
         query = parse_qs(url.query)
         return all(query.get(k) == [str(v)] for k, v in (params or {}).items())

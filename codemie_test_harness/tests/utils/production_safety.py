@@ -108,6 +108,13 @@ def is_read_only_run() -> bool:
     return _read_only_run
 
 
+def transport_guard_required(items) -> bool:
+    """True when the requests transport guard must be installed for this selection."""
+    return _setting_enabled(READ_ONLY_RUN) or any(
+        item.get_closest_marker("cli_analytics") for item in items
+    )
+
+
 def _guarded_origins() -> set[str]:
     origins = set()
     for name in ("CODEMIE_API_DOMAIN", "FRONTEND_URL"):
