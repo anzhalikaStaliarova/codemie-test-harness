@@ -676,3 +676,95 @@ def catalog_cost_by_user(
     for seed in seeds:
         costs[seed.user] = costs.get(seed.user, 0.0) + session_catalog_cost(seed, price)
     return costs
+
+
+# ── Publication contract ─────────────────────────────────────────────────────
+
+# The four ingest routes, one content type each: the contract check runs first on all of them.
+ROUTES = [E1, E3, E5, E7]
+ROUTE_PARAMS = [pytest.param(combo, id=combo.signal) for combo in ROUTES]
+
+
+@dataclass(frozen=True)
+class MalformedContract:
+    """A contract header set refused with a final 422 before the body is read, whatever the
+    rollout switch: the parser runs before it. `project` None sends no X-CodeMie-Project."""
+
+    id: str
+    headers: dict
+    reason: str
+    project: str | None = "autotest-contract-project"
+
+
+MALFORMED_CONTRACTS = [
+    MalformedContract(
+        "consent-without-contract",
+        {"X-CodeMie-Work-Consent": "explicit-folder"},
+        "publication_contract_missing",
+    ),
+    MalformedContract(
+        "funding-without-contract",
+        {"X-CodeMie-Funding-Route": "subscription"},
+        "publication_contract_missing",
+    ),
+    MalformedContract(
+        "unknown-contract-version",
+        {"X-CodeMie-Publication-Contract": "2"},
+        "publication_contract_unsupported",
+    ),
+    MalformedContract(
+        "empty-contract-version",
+        {"X-CodeMie-Publication-Contract": ""},
+        "publication_contract_unsupported",
+    ),
+    MalformedContract(
+        "unknown-consent-value",
+        {
+            "X-CodeMie-Publication-Contract": "1",
+            "X-CodeMie-Work-Consent": "implicit-profile",
+        },
+        "consent_invalid",
+    ),
+    MalformedContract(
+        "consent-without-project",
+        {
+            "X-CodeMie-Publication-Contract": "1",
+            "X-CodeMie-Work-Consent": "explicit-folder",
+        },
+        "consent_without_project",
+        project=None,
+    ),
+    MalformedContract(
+        "consent-with-empty-project",
+        {
+            "X-CodeMie-Publication-Contract": "1",
+            "X-CodeMie-Work-Consent": "explicit-folder",
+        },
+        "consent_without_project",
+        project="",  # HTTP strips surrounding whitespace: a blank value arrives empty
+    ),
+]
+MALFORMED_CONTRACT_PARAMS = [
+    pytest.param(case, combo, id=f"{case.id}-{combo.signal}")
+    for case in MALFORMED_CONTRACTS
+    for combo in ROUTES
+]
+
+# Valid contract requests: (id, consent). While the switch is off both are held.
+VALID_CONTRACT_SHAPES = [
+    pytest.param(False, id="N0-without-consent"),
+    pytest.param(True, id="N1-explicit-folder-consent"),
+]
+CONTRACT_UNAVAILABLE = "publication_contract_unavailable"
+NOT_ADVERTISED = (
+    "BLOCKED: the backend does not advertise publication contract 1 "
+    "(CLI_ANALYTICS_PUBLICATION_CONTRACTS_ENABLED is off on this stand)"
+)
+ADVERTISED = (
+    "the backend advertises publication contract 1: the switch-off hold does not apply"
+)
+NO_CORPORATE_ORGANIZATION = "no corporateOrganizations configured: no session can be classified Corporate or Personal"
+
+# Token counts of the rounds of one session: distinct powers of ten, so the stored total names
+# exactly the rounds that were stored.
+ROUND_TOKENS = {1: 1000, 2: 20000, 3: 300}
