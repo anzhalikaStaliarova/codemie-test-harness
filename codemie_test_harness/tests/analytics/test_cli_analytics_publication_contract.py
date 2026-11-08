@@ -31,6 +31,7 @@ import time
 import uuid
 
 import pytest
+import requests
 from hamcrest import (
     assert_that,
     close_to,
@@ -103,6 +104,21 @@ def _post(client, combo, body, project, headers):
     return IngestClient(client).post_signal(
         combo.signal, body, combo.ct, project=project, extra_headers=headers
     )
+
+
+def _post_refused_upload(client, combo, body, project, headers, attempts: int = 3):
+    """`_post` for a body the stand refuses before reading it. The stand may answer and close the
+    connection while the upload is still being written, which breaks reading the short answer under
+    load; the status is decided before the body, so the request is sent again."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return _post(client, combo, body, project, headers)
+        except (
+            requests.exceptions.ChunkedEncodingError,
+            requests.exceptions.ConnectionError,
+        ):
+            if attempt == attempts:
+                raise
 
 
 @pytest.fixture(scope="module")
@@ -201,13 +217,13 @@ def test_contract_check_precedes_the_body_size_limit(
     """A body over the ingest size cap is a 413 for a legacy request; with a malformed contract it
     is the 422, so the oversized body was never accepted for reading."""
     oversized = b"0" * (MAX_BODY_BYTES + 1)
-    legacy = _post(client, combo, oversized, "autotest", {})
+    legacy = _post_refused_upload(client, combo, oversized, "autotest", {})
     assert_that(
         legacy.status_code,
         equal_to(413),
         "precondition: the stand's ANALYTICS_INGEST_MAX_BODY_BYTES is the default 5 MiB",
     )
-    response = _post(
+    response = _post_refused_upload(
         client,
         combo,
         oversized,
@@ -426,6 +442,11 @@ def test_consented_personal_session_is_published_to_the_named_project(
         close_to(personal["cost_usd"], COST_TOLERANCE),
     )
     assert_that(cost["funding"]["api_based"]["session_count"], equal_to(0))
+    assert_that(
+        cost["kpis"]["total_cost_usd"],
+        close_to(0.0, COST_TOLERANCE),
+        "AC6: the Personal-paid session is listed in the project but adds nothing to its spend",
+    )
 
 
 @pytest.mark.cli_analytics
