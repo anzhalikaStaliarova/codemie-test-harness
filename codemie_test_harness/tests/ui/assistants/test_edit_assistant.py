@@ -15,6 +15,7 @@
 import pytest
 
 from codemie_test_harness.tests import TEST_USER, PROJECT
+from codemie_test_harness.tests.enums.model_types import ModelTypes
 from codemie_test_harness.tests.ui.pageobject.assistants.assistants_page import (
     AssistantsPage,
 )
@@ -24,6 +25,7 @@ from codemie_test_harness.tests.ui.test_data.assistant_test_data import (
 from codemie_test_harness.tests.ui.test_data.assistant_test_data import (
     TOOLKIT_TOOLS,
     AssistantPopUpMessages,
+    toolkit_labels,
     AssistantValidationErrors,
     CodebaseTool,
 )
@@ -46,7 +48,7 @@ def test_edit_assistant_page_elements_visibility(page, assistant):
 
     edit_page.should_have_pinned_title(assistant.name)
     edit_page.should_have_all_form_fields_visible()
-    edit_page.should_have_top_p_and_temperature()
+    edit_page.should_have_effort_select_visible()
     edit_page.should_have_datasource_context()
     edit_page.should_have_sub_assistants_context()
     edit_page.should_have_categories_visible()
@@ -55,7 +57,8 @@ def test_edit_assistant_page_elements_visibility(page, assistant):
         content = TOOLKIT_TOOLS[Section.AVAILABLE_TOOLS]
         edit_page.tools.select_section(Section.AVAILABLE_TOOLS.value)
         for toolkit, tools in content.items():
-            edit_page.tools.select_toolkit(Section.AVAILABLE_TOOLS.value, toolkit.value)
+            for label in toolkit_labels(toolkit):
+                edit_page.tools.select_toolkit(Section.AVAILABLE_TOOLS.value, label)
             for tool in tools:
                 edit_page.tools.should_be_visible_tool(tool.value)
 
@@ -74,13 +77,14 @@ def test_edit_assistant_page_elements_visibility(page, assistant):
 @pytest.mark.assistant
 @pytest.mark.ui
 @pytest.mark.prod_regression
-def test_edit_assistant_form_field_interactions(page, assistant):
+def test_edit_assistant_form_field_interactions(page, assistant_factory):
     """
     Test interacting with all editable form fields.
     """
     EDITED = " EDITED"
     assistant_page = AssistantsPage(page)
-    assistant = assistant()
+    # Non-effort model: Temperature and Top P stay visible for editing
+    assistant = assistant_factory.create(llm_model_type=ModelTypes.GPT_41.value)
 
     assistant_page.navigate_to()
     assistant_page.search_assistants(assistant.name)
@@ -163,7 +167,8 @@ def test_edit_assistant_tools_interactions(
         if section == Section.AVAILABLE_TOOLS:
             edit_page.tools.select_section(section.value)
             for toolkit, tools in content.items():
-                edit_page.tools.select_toolkit(section.value, toolkit.value)
+                for label in toolkit_labels(toolkit):
+                    edit_page.tools.select_toolkit(section.value, label)
                 for tool in tools:
                     if tool in unavailable_tools:
                         continue
@@ -179,8 +184,9 @@ def test_edit_assistant_tools_interactions(
     if Section.AVAILABLE_TOOLS in TOOLKIT_TOOLS:
         content = TOOLKIT_TOOLS[Section.AVAILABLE_TOOLS]
         for toolkit, tools in content.items():
-            toolkit_label = toolkit.value
-            view_page.should_see_toolkit_visible(toolkit_label)
+            toolkit_label = view_page.should_see_toolkit_visible_as_any(
+                toolkit_labels(toolkit)
+            )
             for tool in tools:
                 if tool in unavailable_tools:
                     continue
@@ -190,12 +196,13 @@ def test_edit_assistant_tools_interactions(
 @pytest.mark.assistant
 @pytest.mark.ui
 @pytest.mark.prod_regression
-def test_edit_assistant_incorrect_form(page, assistant):
+def test_edit_assistant_incorrect_form(page, assistant_factory):
     """
     Test interacting with incorrect data.
     """
     assistant_page = AssistantsPage(page)
-    assistant = assistant()
+    # Non-effort model: Temperature and Top P stay visible for validation
+    assistant = assistant_factory.create(llm_model_type=ModelTypes.GPT_41.value)
 
     assistant_page.navigate_to()
     assistant_page.search_assistants(assistant.name)

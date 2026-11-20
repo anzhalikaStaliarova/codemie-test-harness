@@ -29,11 +29,15 @@ import logging
 import secrets
 
 import pytest
-from hamcrest import assert_that, is_
+from hamcrest import assert_that, is_, not_none
 
 from codemie_test_harness.tests.test_data.budget_member_override_test_data import (
     MEMBER_OVERRIDE_MAX,
     MEMBER_OVERRIDE_SOFT,
+)
+from codemie_test_harness.tests.test_data.budget_usage_project_rows_test_data import (
+    SCALED_PROJECT_LIMIT,
+    SCALED_PROJECT_SOFT_LIMIT,
 )
 from codemie_test_harness.tests.utils.credentials_manager import CredentialsManager
 from codemie_test_harness.tests.test_data.budget_test_data import (
@@ -43,6 +47,10 @@ from codemie_test_harness.tests.test_data.budget_test_data import (
     project_key_alias,
 )
 from codemie_test_harness.tests.ui.pageobject.login_page import LoginPage
+from codemie_test_harness.tests.ui.test_data.personal_spending_test_data import (
+    SPENT_CATEGORY,
+    TWO_CATEGORY_DISTRIBUTION,
+)
 from codemie_test_harness.tests.utils.admin_project_budget_group_utils import (
     AdminProjectBudgetGroupUtils,
 )
@@ -51,6 +59,7 @@ from codemie_test_harness.tests.utils.admin_project_budget_utils import (
 )
 from codemie_test_harness.tests.utils.client_factory import get_client
 from codemie_test_harness.tests.utils.project_utils import ProjectUtils
+from codemie_test_harness.tests.utils.user_lifecycle_utils import new_logged_in_user
 
 
 logger = logging.getLogger(__name__)
@@ -93,88 +102,64 @@ def project_admin_setup(
     uid = secrets.token_hex(4)
     project_name = f"autotest-pa-ui-{uid}"
     email = f"autotest_pa_ui_{uid}@email.com"
-    group_id = None
-    user_id = None
+    # Create the budget group directly via the budget-groups endpoint.
+    group_utils = AdminProjectBudgetGroupUtils(get_client())
 
+    # Teardown — best-effort, never fail the test on cleanup errors.
     try:
         admin_project_utils.create_project(
             name=project_name, description="Autotest PA UI budget group project"
         )
-
-        # Create the budget group directly via the budget-groups endpoint.
-        _admin_client = get_client()
-        _group_utils = AdminProjectBudgetGroupUtils(_admin_client)
-        group = _group_utils.create_budget_group(
+        group_id = group_utils.create_budget_group(
             project_name=project_name,
             total_amount=100.0,
             budget_duration="30d",
             categories={"platform": 100.0},
-        )
-        group_id = group["group_id"]
-
-        # Create a project-admin user and assign them to the project.
-        password = keycloak_utils.create_test_user(
-            email=email, project_name=project_name
-        )
-        user_c = get_client(username=email, password=password)
-        user_id = user_c.users.about_me().user_id
-        admin_project_utils.assign_user_to_project(
-            project_name, user_id, is_project_admin=True
-        )
-    except Exception:
-        if group_id is not None:
+        )["group_id"]
+        try:
+            # Create a project-admin user and assign them to the project.
+            with new_logged_in_user(
+                keycloak_utils, email, admin=True, project_name=project_name
+            ) as user:
+                admin_project_utils.assign_user_to_project(
+                    project_name, user.user_id, is_project_admin=True
+                )
+                yield project_name, group_id, email, user.password
+                try:
+                    admin_project_utils.remove_user_from_project(
+                        project_name, user.user_id
+                    )
+                except Exception:
+                    pass
+            for customer_id in (
+                email,
+                f"{email}_{DEFAULT_CLI_BUDGET_ID}",
+                f"{email}_{DEFAULT_PREMIUM_BUDGET_ID}",
+            ):
+                try:
+                    lite_llm_budget_utils.delete_customer(customer_id)
+                except Exception:
+                    pass
+            for category in ("platform", "cli", "premium_models"):
+                try:
+                    lite_llm_budget_utils.delete_key_by_alias(
+                        project_key_alias(project_name, category)
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to delete LiteLLM key for project {project_name} "
+                        f"category {category}: {e}"
+                    )
+        finally:
             try:
-                _group_utils.delete_budget_group(group_id)
+                group_utils.delete_budget_group(group_id)
             except Exception:
                 pass
-        try:
-            keycloak_utils.delete_user(email)
-        except Exception:
-            pass
+    finally:
         try:
             admin_project_utils.delete_project(project_name)
         except Exception:
             pass
-        raise
-
-    yield project_name, group_id, email, password
-
-    # Teardown — best-effort, never fail the test on cleanup errors.
-    try:
-        admin_project_utils.remove_user_from_project(project_name, user_id)
-    except Exception:
-        pass
-    try:
-        keycloak_utils.delete_user(email)
-    except Exception:
-        pass
-    for customer_id in (
-        email,
-        f"{email}_{DEFAULT_CLI_BUDGET_ID}",
-        f"{email}_{DEFAULT_PREMIUM_BUDGET_ID}",
-    ):
-        try:
-            lite_llm_budget_utils.delete_customer(customer_id)
-        except Exception:
-            pass
-    for category in ("platform", "cli", "premium_models"):
-        try:
-            lite_llm_budget_utils.delete_key_by_alias(
-                project_key_alias(project_name, category)
-            )
-        except Exception as e:
-            logger.warning(
-                f"Failed to delete LiteLLM key for project {project_name} "
-                f"category {category}: {e}"
-            )
-    try:
-        _group_utils.delete_budget_group(group_id)
-    except Exception:
-        pass
-    try:
-        admin_project_utils.delete_project(project_name)
-    except Exception:
-        pass
 
 
 @pytest.fixture(scope="function")
@@ -185,16 +170,14 @@ def project_admin_setup_client(project_admin_setup):
 
 
 @pytest.fixture(scope="function")
-def member_override_ui_setup(
-    project_admin_setup, admin_project_utils, keycloak_regular_user
-):
+def member_override_ui_setup(project_admin_setup, admin_project_utils, platform_user):
     """Project from project_admin_setup with member tracking on and a developer-only member.
 
     Yields:
         tuple: (email, password, user_id) of the non-admin project member.
     """
     project_name = project_admin_setup[0]
-    email, password = keycloak_regular_user
+    email, password = platform_user.email, platform_user.password
     user_id = get_client(username=email, password=password).users.about_me().user_id
     admin_project_utils.enable_member_budget_tracking(project_name)
     admin_project_utils.assign_user_to_project(
@@ -235,7 +218,7 @@ def unassigned_member_with_personal_budgets(
     project_admin_setup,
     admin_project_utils,
     admin_budget_utils,
-    keycloak_regular_user,
+    platform_user,
 ):
     """A developer user outside the project, with enforcement on and a personal budget in every category.
 
@@ -245,7 +228,7 @@ def unassigned_member_with_personal_budgets(
         tuple: (email, password, user_id) of the not yet assigned user.
     """
     project_name = project_admin_setup[0]
-    email, password = keycloak_regular_user
+    email, password = platform_user.email, platform_user.password
     user_id = get_client(username=email, password=password).users.about_me().user_id
     admin_project_utils.enable_member_budget_tracking(project_name)
     personal_budgets = {
@@ -291,6 +274,97 @@ def member_override_ui_ready(
         "Project admin was not permitted to override a member allocation",
     )
     return member_override_ui_setup
+
+
+@pytest.fixture(scope="function")
+def two_category_budget(project_admin_setup, client):
+    """The budget group of ``project_admin_setup`` spread over the platform and cli categories.
+
+    The personal spending panel draws a table only for two or more rows, and a category without
+    a project budget has no row, so the single-category group of ``project_admin_setup`` would
+    render the doughnut. The group is changed here, not in ``project_admin_setup``, so the other
+    tests of this folder keep their platform-only group; the group is deleted with the project.
+
+    Returns:
+        tuple: (project_name, group_id).
+    """
+    project_name, group_id, _, _ = project_admin_setup
+    AdminProjectBudgetGroupUtils(client).update_group(
+        group_id, TWO_CATEGORY_DISTRIBUTION
+    )
+    return project_name, group_id
+
+
+@pytest.fixture(scope="function")
+def scaled_spent_category_budget(
+    two_category_budget, admin_project_budget_utils, lite_llm_budget_utils
+):
+    """``two_category_budget`` with the spent category's hard limit scaled down.
+
+    Real chat spend is a few cents, which the table rounds to 0.0% of a 50 dollar budget but
+    shows as a visible percentage of a one dollar budget. Waits for the category's LiteLLM key,
+    which receives the spend.
+
+    Returns:
+        tuple: (project_name, group_id).
+    """
+    project_name, group_id = two_category_budget
+    admin_project_budget_utils.update_budget_group_category(
+        group_id,
+        SPENT_CATEGORY,
+        max_budget=SCALED_PROJECT_LIMIT,
+        soft_budget=SCALED_PROJECT_SOFT_LIMIT,
+    )
+    key = lite_llm_budget_utils.wait_for_key_alias(
+        project_key_alias(project_name, SPENT_CATEGORY)
+    )
+    assert_that(
+        key,
+        not_none(),
+        f"The LiteLLM key of the {SPENT_CATEGORY} category was not created",
+    )
+    return project_name, group_id
+
+
+@pytest.fixture(scope="function")
+def spent_member_cleanup(
+    project_admin_setup,
+    member_override_ui_setup,
+    scaled_spent_category_budget,
+    client,
+    lite_llm_budget_utils,
+):
+    """Removes, after the test, the LiteLLM objects that spending as the member leaves behind.
+
+    The project keys are deleted by ``project_admin_setup``; the member's spend customers and the
+    child budget objects of the budget group are not. Best effort: never fails the test.
+    """
+    project_name, group_id, _, _ = project_admin_setup
+    _, _, member_id = member_override_ui_setup
+    yield
+    try:
+        categories = AdminProjectBudgetGroupUtils(client).get_group(group_id)[
+            "categories"
+        ]
+    except Exception as e:
+        logger.warning(f"Failed to read budget group {group_id}: {e}")
+        categories = []
+    for category in categories:
+        budget_id = category.get("budget_id")
+        try:
+            lite_llm_budget_utils.delete_project_budget_objects(budget_id, member_id)
+        except Exception as e:
+            logger.warning(
+                f"Failed to delete LiteLLM budget objects of {budget_id}: {e}"
+            )
+    try:
+        lite_llm_budget_utils.delete_override_customers_for_project(
+            project_name, member_id
+        )
+    except Exception as e:
+        logger.warning(
+            f"Failed to delete spend customers of {member_id} in project {project_name}: {e}"
+        )
 
 
 @pytest.fixture(scope="function")

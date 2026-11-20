@@ -33,9 +33,9 @@ a dedicated non-parallel pass.
 - **Selectors:** `get_by_role()` first, then `get_by_label()` / `get_by_text()` / `get_by_placeholder()`, then a scoped `.locator()` with `.filter()`. No `nth-child`, deeply nested CSS, or generated class names.
 - **Abstractions:** page-object model — `tests/ui/pageobject/<area>/<subject>_page.py`, every class derives from `BasePage` (navigation helpers, `self.pop_up`, `self.menu`, common verifications). Elements are `@property` locators with a docstring. Public methods carry `@step` (from `reportportal_client`). Assertions live in page-object `should_*` methods using `expect()`, which retries; never a bare `assert` on a locator. Reusable widgets: `tests/ui/pageobject/components/`.
 - **Run one test:** `poetry run pytest -v <test-file> --ui-headless`
-- **Run suite:** `poetry run pytest -n 4 -m ui --reruns 2 --ui-headless`
+- **Run suite:** `poetry run pytest -n 4 --dist=loadgroup -m ui --reruns 2 --ui-headless`
 
-`--ui-headless` is required explicitly — the pytest.ini line that would make it the default is commented out.
+`--ui-headless` is required explicitly: without it the browser runs headed (`tests/ui/conftest.py`, `browser_type_launch_args` fixture).
 
 ## Suite inventory
 
@@ -43,7 +43,7 @@ a dedicated non-parallel pass.
 |---|---|---|
 | `api` | `codemie_test_harness/tests/` (all areas except `ui/`) | API / integration tests against a deployed stand |
 | `ui` | `codemie_test_harness/tests/ui/` | Playwright UI tests |
-| `sanity` | marker, across areas | assistants / workflows / datasources without integrations; the only suite that needs no AWS credentials |
+| `sanity` | marker, across areas | assistants / workflows / datasources without integrations; the only suite that needs no integration settings |
 | `smoke` | marker, across areas | quick checks for local development |
 | `enterprise` | marker, across areas | enterprise-only features |
 | `prod_regression` | marker, `ui` only | UI tests safe to run on PROD with a regular user or admin (not a maintainer); run with `-m "ui and prod_regression"`. Never on `budget`, `cli_analytics`, `auditor` or `aice` tests |
@@ -53,7 +53,7 @@ a dedicated non-parallel pass.
 
 - Every test carries exactly one of `@pytest.mark.api` or `@pytest.mark.ui` — never both. A test with neither is selected by no suite.
 - Stated stack order for new tests: scope (`smoke`, `sanity`) → feature → `api`/`ui` last, directly above `def`. Older tests vary (`timeout` or `parametrize` sometimes sit last); don't reorder existing tests just for this.
-- **No ticket references in new tests.** Do not add `@pytest.mark.testcase(...)`, and do not put a ticket key anywhere in test code, names, comments, docstrings or test data. The factory's `# @case <case ID>` traceability comment stays: its ID is ticket-free (`<slug>_TC_001`). Some existing tests still carry the old marker or ticket-keyed `@case` IDs; leave them, and do not copy the form.
+- **No ticket references in new tests.** Do not add `@pytest.mark.testcase(...)`, and do not put a ticket key anywhere in test code, names, comments, docstrings or test data. The factory's `# @case <case ID>` traceability comment stays: its ID is ticket-free (`<slug>_TC_001`).
 - `@pytest.mark.not_for_parallel_run` on any test that mutates state other tests share.
 
 ## Execution traps
@@ -66,11 +66,36 @@ a dedicated non-parallel pass.
 
 ## Code rules
 
-- **SDK first.** Every CodeMie API call in a test or fixture goes through `client.<service>` or a `*_utils` wrapper. The tests import the published `codemie-sdk-python`, pinned in `pyproject.toml`; the SDK is developed in its own public repository, recorded as the `sdk` entry in `config.json` (`code_repos`, change policy `extend`). If the SDK lacks the call, add it there — new code only, following that repository's contributing guide and its checks — never in a copy inside this monorepo. `from requests import HTTPError` is the normal way to assert an error the SDK raises — that import is fine. Known raw-HTTP exceptions: `conversations/test_conversation_feedback.py` (SDK gap for `/v1/feedback`) and `assistant/tools/ado/test_assistant_for_ado_work_item_tools.py` (verifies state in Azure DevOps itself, not CodeMie).
+- **SDK first.** Every CodeMie API call in a test or fixture goes through `client.<service>` or a `*_utils` wrapper. The tests import the published `codemie-sdk-python`, pinned in `pyproject.toml`; the SDK is developed in its own public repository, recorded as the `sdk` entry in `config.json` (`code_repos`, change policy `extend`). If the SDK lacks the call, add it there — new code only, following that repository's contributing guide and its checks — never in a copy inside this repository. `from requests import HTTPError` is the normal way to assert an error the SDK raises — that import is fine. Known raw-HTTP exceptions: `conversations/test_conversation_feedback.py` (SDK gap for `/v1/feedback`) and `assistant/tools/ado/test_assistant_for_ado_work_item_tools.py` (verifies state in Azure DevOps itself, not CodeMie).
 - **Credentials** come from `CredentialsManager.get_parameter("KEY")`, never `os.getenv()`. Some older datasource and UI workflow tests still read values with `os.getenv()`; don't copy that. `EnvironmentResolver` (`tests/utils/env_resolver.py`) derives the current environment from `CODEMIE_API_DOMAIN`.
 - **No mocking library** in tests — they run against a deployed stand.
 - **Every `.py` file carries the Apache-2.0 licence header** from `scripts/license_template.txt`; a new file needs it (`make license-fix` inserts it).
 - **No internal values in tracked files.** Hosts, e-mail domains, ticket keys and customer names stay out of the tree; `make scan-internal` checks it (needs `HARNESS_SCAN_PATTERNS` and/or `HARNESS_SCAN_CUSTOMER_NAMES` set on the machine; exit 2 means none is set).
+
+## User fixtures
+
+Role fixtures in `tests/conftest.py` (session-scoped `keycloak_utils` picks LocalUserUtils or
+KeycloakUtils by `CODEMIE_API_DOMAIN`; see `tests/utils/user_lifecycle_utils.py`). Each one
+creates a fresh user, yields a `LoggedInUser` (`.email`, `.password`, `.user_id`, `.client`),
+and deletes the user after the test, also when the test fails.
+
+| Fixture | Role |
+|---|---|
+| `platform_user` | no platform role, only their own personal project |
+| `admin_user` | platform admin, not maintainer |
+| `maintainer_user` | maintainer flag only |
+| `auditor_user` | auditor flag only; module-scoped, shared within a module (and xdist worker) |
+| `project_admin_user` | `platform_user` made project admin of `default_project_member`'s project |
+| `platform_project_user` (`tests/user/conftest.py`) | `platform_user` who is a plain member (not project admin) of its own fresh `temp_project` |
+| `second_platform_user`, `second_admin_user` | a second, distinct user of that role — take one of these instead of requesting the base fixture twice |
+
+Use `admin_client`, `maintainer_client`, `verified_maintainer_client` or `verified_auditor_client`
+when a test only needs the client, not the email or password; they wrap the fixtures above and
+add a wait (`admin_client`, `maintainer_client`) or a real-role assertion (`verified_*`).
+
+`budgets/conftest.py` has its own `budget_project_admin_user`: a platform *admin* who is also
+project admin of the budget project, not a `project_admin_user` (plain user). Do not conflate
+the two — the budgets tests rely on the admin role, the root fixture's tests rely on its absence.
 
 ## Anti-patterns
 
@@ -92,8 +117,7 @@ A few legacy tests still contain some of these (`wait_for_timeout`, `pytest.fail
 
 ## Project conventions
 
-- `test-harness/AGENTS.md` is this repository's AI entrypoint; the monorepo-root `AGENTS.md` points here for test-harness guidance.
-- Lint and format through `ruff` (`Makefile`): `poetry run ruff check --fix`, `poetry run ruff check`, `poetry run ruff format`. Check-only forms: `poetry run ruff check`, `poetry run ruff format --check`.
-- Other `Makefile` targets: `make license-check` / `make license-fix` (licence headers), `make license-scan` (dependency licences), `make scan-internal` (internal values), `make install-hooks` (pre-commit hook for lint, format and the internal-value scan). The scan scripts are invoked as `python3`; where only `python` exists, run them with that.
-- UI tests need Playwright browsers (`playwright install`). Most suites need AWS credentials to load integration settings from Parameter Store; `sanity` is the one suite that needs none (README).
+- `AGENTS.md` is this repository's AI entrypoint.
+- Lint, format, licence, scan and hook commands: see [quality-gates.md](../quality-gates.md).
+- UI tests need Playwright browsers (`playwright install`). The full suites (`smoke`, `api`, `ui`) contain integration tests that need their own settings; the `sanity-*` suites need none (`README.md`, "Settings").
 - To run the tests against an unreleased SDK change, install the SDK clone on top of the Poetry environment (`consume.local` of the `sdk` entry in `config.json`); `make install` returns to the pinned release. The tests then follow whatever branch that clone has checked out.

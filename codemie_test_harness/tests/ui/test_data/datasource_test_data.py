@@ -144,6 +144,12 @@ EMPTY_FILE_ERROR = "At least one file is required"
 EMPTY_GOOGLE_LINK_ERROR = "Google Docs link is required"
 EMPTY_INTEGRATION_ERROR = "Integration is required for this data source type"
 
+# Placeholder of the integration dropdown on the Git data source form: the literal
+# `integrationPlaceholder="Integration for Git"` prop in the UI repo
+# (src/pages/dataSources/components/DataSourceForm/IndexTypeField/IndexTypeGit.tsx,
+# also used by the Git FAQ form)
+GIT_INTEGRATION_PLACEHOLDER = "Integration for Git"
+
 FULL_REINDEX_STARTED = (
     "Full reindexing of datasource  has been started in the background"
 )
@@ -155,3 +161,14 @@ CLONE_PAGE_TITLE = "Clone Data Source"
 CLONE_SIDEBAR_TITLE = "Clone DataSource"
 CLONE_SIDEBAR_SUBTITLE = "Create a new data source based on an existing one"
 CLONE_DATA_SOURCE_NOT_FOUND = "Data source not found"
+
+# ==================== GIT FILES FILTER PLACEHOLDER ====================
+
+# Each example must sit in the Git "Files Filter" placeholder as its own line.
+GIT_FILES_FILTER_PLACEHOLDER_EXAMPLES = [
+    "*.py",
+    "*.txt",
+    "debug.log*",
+    "/<folder_name>/*",
+    "/<folder_name>/*/*.cs",
+]

@@ -1,3 +1,17 @@
+# Copyright 2026 EPAM Systems, Inc. (“EPAM”)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """UI tests for the Users badge of Projects Management.
 
 The 'Users' column of the projects table stays, but its cell is now a badge (aria-label 'Users',
@@ -22,7 +36,9 @@ from codemie_test_harness.tests.ui.pageobject.administration.user_management_pag
 
 
 @pytest.mark.ui
+@pytest.mark.prod_regression
 @pytest.mark.project
+@pytest.mark.oss_standalone
 def test_users_cell_shows_badge_with_user_count(page, project_utils, project):
     """The Users cell holds a badge (svg icon + count) equal to
     the project's user count from the API; the Users column header remains.
@@ -42,14 +58,16 @@ def test_users_cell_shows_badge_with_user_count(page, project_utils, project):
 
 
 @pytest.mark.ui
+@pytest.mark.prod_regression
 @pytest.mark.project
+@pytest.mark.oss_standalone
 def test_users_badge_opens_user_management_filtered_by_project(
-    page, project_utils, non_admin_user, keycloak_regular_user, project
+    page, project_utils, platform_user, second_platform_user, project
 ):
     """Clicking the Users badge opens User Management with
     ?projects=<project name>; the assigned user is listed and the unassigned one is not."""
-    assigned_email, assigned_id, _ = non_admin_user
-    unassigned_email, _ = keycloak_regular_user
+    assigned_email, assigned_id = platform_user.email, platform_user.user_id
+    unassigned_email = second_platform_user.email
     created = project()
     project_utils.assign_user_to_project(
         created.name, assigned_id, is_project_admin=False
@@ -67,7 +85,9 @@ def test_users_badge_opens_user_management_filtered_by_project(
 
 
 @pytest.mark.ui
+@pytest.mark.prod_regression
 @pytest.mark.project
+@pytest.mark.oss_standalone
 def test_project_filter_shows_selected_project_after_badge_navigation(page, project):
     """After navigating through the Users badge the project is
     shown as selected in the User Management project filter, not only present in the URL."""
@@ -92,6 +112,7 @@ def test_project_filter_shows_selected_project_after_badge_navigation(page, proj
     ],
     indirect=["acting_credentials"],
 )
+@pytest.mark.oss_standalone
 def test_users_badge_is_a_link_only_for_platform_roles(
     page, project_utils, cli_ui_world, acting_credentials, badge_is_link
 ):

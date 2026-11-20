@@ -27,6 +27,9 @@ from hamcrest import (
     any_of,
 )
 
+from codemie_test_harness.tests.test_data.marketplace_approval_gate_test_data import (
+    fit_to_core_gates,
+)
 from codemie_test_harness.tests.test_data.marketplace_test_data import (
     VALIDATION_TEST_CONFIGS,
     COMPLETE_VALID_CONFIG,
@@ -38,7 +41,7 @@ from codemie_test_harness.tests.test_data.marketplace_test_data import (
 @pytest.mark.assistant
 @pytest.mark.api
 def test_marketplace_publish_with_valid_data(assistant, assistant_utils):
-    """Test validating and publishing an assistant with all valid data without ignore_recommendations."""
+    """Test validating and publishing an assistant with all valid data, acknowledging optional LLM recommendations."""
     # Create assistant with complete valid configuration
     created_assistant = assistant(**COMPLETE_VALID_CONFIG)
 
@@ -56,10 +59,12 @@ def test_marketplace_publish_with_valid_data(assistant, assistant_utils):
         ),
     )
 
-    # After successful validation, publish to marketplace WITHOUT ignore_recommendations
+    # The publish-time LLM check may return optional suggestions (e.g. drop the random
+    # name suffix) that block with 422 unless acknowledged
     publish_response = assistant_utils.publish_assistant_to_marketplace(
         created_assistant.id,
         categories=COMPLETE_VALID_CONFIG["categories"],
+        ignore_recommendations=True,
     )
 
     # Assert publish response
@@ -209,7 +214,6 @@ def _make_test_params():
 
 
 @pytest.mark.smoke
-@pytest.mark.sanity
 @pytest.mark.marketplace
 @pytest.mark.assistant
 @pytest.mark.api
@@ -218,10 +222,14 @@ def _make_test_params():
     [pytest.param(tc, id=tc["id"]) for tc in VALIDATION_TEST_CONFIGS],
 )
 def test_marketplace_validation_fields_recommendation(
-    assistant, assistant_utils, test_case
+    assistant, assistant_utils, marketplace_core_gates, test_case
 ):
-    """Test validation recommendations for different field configurations."""
-    config = test_case["config"]
+    """Test validation recommendations for different field configurations.
+
+    The deliberately wrong description and system prompt are extended to the stand's core
+    gate thresholds, so the quality check (not the length gates) is what rejects them.
+    """
+    config = fit_to_core_gates(test_case["config"], marketplace_core_gates)
     expected_issues = test_case["expected_issues"]
 
     # Create assistant with specific configuration
@@ -237,7 +245,11 @@ def test_marketplace_validation_fields_recommendation(
 
     # Extract validation response from error
     response_data = json.loads(exec_info.value.response.content)
-    assert_that(exec_info.value.response.status_code, equal_to(422))
+    assert_that(
+        exec_info.value.response.status_code,
+        equal_to(422),
+        f"Unexpected publish response: {exec_info.value.response.text}",
+    )
 
     # Check if response has quality_validation in error.details
     assert_that(response_data, has_key("error"))

@@ -94,8 +94,13 @@ class UserManagementPage(BasePage):
         return self.user_rows.filter(has_text=email)
 
     def _user_email_button(self, email: str):
-        """Button labelled with the user's email address (opens User Details dialog)."""
-        return self._user_row(email).get_by_role("button", name=email)
+        """Button labelled with the user's email address (opens User Details dialog).
+
+        Must be exact: the row's 'More options' button has an `aria-labelledby` that
+        includes the user-name element, so its computed accessible name contains the
+        email too and a substring match resolves to both buttons.
+        """
+        return self._user_row(email).get_by_role("button", name=email, exact=True)
 
     def _row_menu_button(self, email: str):
         """'More options' button in the actions cell of the user's row."""
@@ -414,6 +419,23 @@ class UserManagementPage(BasePage):
         expect(dialog.get_by_text("Projects", exact=False)).to_be_visible(timeout=5000)
         return self
 
+    def _identity_value(self, label: str):
+        """Value span that follows a label ('ID:' / 'Email:') in the User Details identity block."""
+        return self.user_details_dialog.get_by_text(label, exact=True).locator(
+            "xpath=following-sibling::span[1]"
+        )
+
+    @step
+    def should_see_user_identity(self, user_id: str, email: str):
+        """Assert the open User Details dialog shows the opened user's ID and email.
+
+        The identity block under the name heading has no test id: each field is a label span
+        ('ID:' / 'Email:') followed by a value span.
+        """
+        expect(self._identity_value("ID:")).to_have_text(user_id, timeout=10000)
+        expect(self._identity_value("Email:")).to_have_text(email, timeout=10000)
+        return self
+
     @step
     def should_not_see_write_controls(self):
         """Assert no user write controls are exposed for the auditor role.
@@ -451,6 +473,15 @@ class UserManagementPage(BasePage):
         expect(
             self.user_details_dialog.locator("input[type=radio]:checked")
         ).to_have_count(1, timeout=10000)
+        return self
+
+    @step
+    def should_see_single_project_in_details(self, project: str):
+        """Assert the User Details projects table lists exactly one project: the given one."""
+        expect(self.details_projects_table.locator("tbody tr")).to_have_count(
+            1, timeout=10000
+        )
+        expect(self._details_project_row(project)).to_have_count(1, timeout=10000)
         return self
 
     @step

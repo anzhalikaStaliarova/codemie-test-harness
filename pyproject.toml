@@ -13,7 +13,7 @@ packages = [
 
 [tool.poetry.dependencies]
 python = "^3.12"
-codemie-sdk-python = "0.1.709"
+codemie-sdk-python = "0.1.721"
 pytest = "^8.4.1"
 python-dotenv = "^1.1.0"
 PyHamcrest = "^2.1.0"
@@ -89,6 +89,7 @@ allow-only = """
     MIT License;\
     MIT License; Mozilla Public License 2.0 (MPL 2.0);\
     MIT-CMU;\
+    MIT-0;\
     Mozilla Public License 2.0 (MPL 2.0);\
     PSF-2.0;\
     Python Software Foundation License;\
@@ -127,7 +128,9 @@ markers = [
     "user: User management admin API tests",
     "cli_analytics: CLI Analytics tests",
     "project: Project management tests",
-    "prod_regression: read-only UI/API tests safe to run on PROD (regular user or admin, not a maintainer); on PROD unmarked cli_analytics tests are skipped",
+    "hosted_applications: Hosted applications (upload, share, view) tests",
+    "prod_regression: UI/API tests safe to run on PROD (regular user or admin, not a maintainer); a cli_analytics test with it is read-only, and cli_analytics tests without it are skipped on PROD and Preview",
+    "oss_standalone: Integration-entity tests safe to run against an OSS standalone deployment",
     "requires_capability(name): needs a /v1/config capability, skipped in gated runs when absent",
     "requires_setting(KEY): needs a harness setting, skipped in gated runs when unset",
 ]

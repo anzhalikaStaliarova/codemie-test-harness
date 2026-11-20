@@ -14,6 +14,8 @@
 
 from typing import Any, Optional, Dict
 
+import requests
+
 from codemie_sdk.models.integration import (
     Integration,
     CredentialTypes,
@@ -141,6 +143,14 @@ class IntegrationUtils(BaseUtils):
             setting_id=integration.id, setting_type=integration.setting_type
         )
 
+    def delete_integration_if_exists(self, integration: Integration):
+        """Delete the integration unless a test already removed it."""
+        try:
+            return self.delete_integration(integration)
+        except requests.exceptions.HTTPError as error:
+            if error.response is None or error.response.status_code != 404:
+                raise
+
     def delete_integrations_by_type(
         self,
         integration_type: IntegrationType,
@@ -224,6 +234,34 @@ class IntegrationUtils(BaseUtils):
         filters: Optional[Dict[str, Any]] = None,
     ):
         return self.client.integrations.list(setting_type, page, per_page, filters)
+
+    def list_combined(
+        self,
+        scope: Optional[str] = "all",
+        page: int = 0,
+        per_page: int = 10,
+        filters: Optional[Dict[str, Any] | str] = None,
+    ):
+        """One page of integrations across scopes, with the pagination of the whole result.
+
+        Thin wrapper around ``client.integrations.list_combined`` (GET /v1/settings).
+        ``scope=None`` sends no scope; ``filters`` may be a raw string to send a malformed value.
+        """
+        return self.client.integrations.list_combined(
+            scope=scope, page=page, per_page=per_page, filters=filters
+        )
+
+    def delete_integrations_by_alias(self, alias: str):
+        """Delete every integration of either scope this client lists under ``alias``.
+
+        Cleanup for rows a UI flow created: only the alias is known, not the scope or the id.
+        """
+        rows = self.list_combined(
+            scope="all", per_page=100, filters={"search": alias}
+        ).data
+        for row in rows:
+            if row.alias == alias:
+                self.delete_integration_if_exists(row)
 
     def transfer_settings(
         self,

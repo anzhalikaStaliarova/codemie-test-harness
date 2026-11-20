@@ -22,7 +22,7 @@ Covers:
     TC-005  user.project.assigned and user.project.removed events stored in sequence
     TC-012  user.project.role_updated event stored when user role is changed
 
-Parallelism strategy: each test creates its own disposable_user (function-scoped)
+Parallelism strategy: each test creates its own admin_user (function-scoped)
 and filters audit queries by entity_id=<user_id>, so tests are fully isolated
 regardless of parallel execution.
 """
@@ -48,9 +48,9 @@ from codemie_test_harness.tests.utils.base_utils import get_random_name
 
 @pytest.mark.activity
 @pytest.mark.api
-def test_user_created_audit_record_stored(activity_utils, disposable_user):
+def test_user_created_audit_record_stored(activity_utils, admin_user):
     """TC-001: user.created audit record is stored when a user is added."""
-    _, user_id, _ = disposable_user
+    user_id = admin_user.user_id
 
     response = activity_utils.list_activity_events(
         entity_id=user_id,
@@ -98,9 +98,9 @@ def test_user_created_audit_record_stored(activity_utils, disposable_user):
 
 @pytest.mark.activity
 @pytest.mark.api
-def test_user_updated_audit_record_stored(activity_utils, user_utils, disposable_user):
+def test_user_updated_audit_record_stored(activity_utils, user_utils, admin_user):
     """TC-002: user.updated audit record is stored when user profile is changed."""
-    _, user_id, _ = disposable_user
+    user_id = admin_user.user_id
 
     new_name = get_random_name()
     user_utils.update_admin_user(user_id, name=new_name)
@@ -140,11 +140,9 @@ def test_user_updated_audit_record_stored(activity_utils, user_utils, disposable
 
 @pytest.mark.activity
 @pytest.mark.api
-def test_user_deactivated_audit_record_stored(
-    activity_utils, user_utils, disposable_user
-):
+def test_user_deactivated_audit_record_stored(activity_utils, user_utils, admin_user):
     """TC-003: user.deactivated audit record is stored when user is deactivated."""
-    _, user_id, _ = disposable_user
+    user_id = admin_user.user_id
 
     user_utils.deactivate_user(user_id)
 
@@ -188,12 +186,10 @@ def test_user_deactivated_audit_record_stored(
 
 @pytest.mark.activity
 @pytest.mark.api
-def test_user_reactivated_audit_record_stored(
-    activity_utils, user_utils, disposable_user
-):
+def test_user_reactivated_audit_record_stored(activity_utils, user_utils, admin_user):
     """TC-003b: user.reactivated audit record is stored when a deactivated user is reactivated."""
     # @case platform-admins-deactivate-reactivate-users_TC_011
-    _, user_id, _ = disposable_user
+    user_id = admin_user.user_id
     actor_id = user_utils.get_about_me().user_id
     user_utils.deactivate_user(user_id)
 
@@ -244,11 +240,11 @@ def test_user_reactivated_audit_record_stored(
 @pytest.mark.activity
 @pytest.mark.api
 def test_user_project_assigned_and_removed_audit_records_stored(
-    activity_utils, project_utils, disposable_user, activity_project
+    activity_utils, project_utils, admin_user, activity_project
 ):
     """TC-005: user.project.assigned and user.project.removed audit records
     are stored in sequence for project assignment and removal."""
-    _, user_id, _ = disposable_user
+    user_id = admin_user.user_id
     project_name = activity_project
 
     # Assign user to project and assert audit record
@@ -330,10 +326,10 @@ def test_user_project_assigned_and_removed_audit_records_stored(
 @pytest.mark.activity
 @pytest.mark.api
 def test_user_project_role_updated_audit_record_stored(
-    activity_utils, project_utils, disposable_user, activity_project
+    activity_utils, project_utils, admin_user, activity_project
 ):
     """TC-012: user.project.role_updated audit record is stored when role changes."""
-    _, user_id, _ = disposable_user
+    user_id = admin_user.user_id
     project_name = activity_project
 
     project_utils.assign_user_to_project(project_name, user_id, is_project_admin=False)
@@ -369,3 +365,69 @@ def test_user_project_role_updated_audit_record_stored(
     )
 
     project_utils.remove_user_from_project(project_name, user_id)
+
+
+# ---------------------------------------------------------------------------
+# user.remapped
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.activity
+@pytest.mark.api
+def test_user_remapped_audit_record_stored(
+    activity_utils, user_utils, admin_user, new_user_id_factory
+):
+    """user.remapped audit record is stored when an admin remaps a user id."""
+    # @case identity-remap-migration_TC_008
+    old_user_id = admin_user.user_id
+    new_user_id = new_user_id_factory()
+    actor_id = user_utils.get_about_me().user_id
+
+    user_utils.remap_user(old_user_id, new_user_id)
+
+    response = activity_utils.list_activity_events(
+        entity_id=new_user_id,
+        event_type=["user.remapped"],
+    )
+
+    assert_that(
+        len(response.data),
+        equal_to(1),
+        "Exactly one user.remapped event should exist for the remapped user",
+    )
+    record = response.data[0]
+    assert_that(
+        record.event_type,
+        equal_to("user.remapped"),
+        "event_type should be user.remapped",
+    )
+    assert_that(
+        record.entity_id,
+        equal_to(new_user_id),
+        "entity_id should be the user's new id",
+    )
+    assert_that(
+        record.actor_id,
+        equal_to(actor_id),
+        "actor_id should be the admin who performed the remap",
+    )
+    assert_that(
+        record.attributes,
+        not_none(),
+        "attributes should be set for the remap",
+    )
+    assert_that(
+        record.attributes.get("old_id"),
+        equal_to(old_user_id),
+        "attributes.old_id should be the user's old id",
+    )
+    assert_that(
+        record.attributes.get("new_id"),
+        equal_to(new_user_id),
+        "attributes.new_id should be the user's new id",
+    )
+    assert_that(
+        record.attributes.get("actor_user_id"),
+        equal_to(actor_id),
+        "attributes.actor_user_id should be the admin who performed the remap",
+    )

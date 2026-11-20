@@ -6,7 +6,7 @@
     "root": "."
   },
   "publication": {
-    "visibility": "private",
+    "visibility": "public",
     "ticket_refs": "none",
     "repo_urls": "derive",
     "environment_urls": "env_var",

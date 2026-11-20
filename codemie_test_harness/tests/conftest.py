@@ -12,9 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
+import json
 import os
 import re
 import secrets
+import tempfile
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -22,7 +26,8 @@ from time import sleep
 from typing import List, Optional
 
 import pytest
-from hamcrest import assert_that, not_none
+from filelock import FileLock, Timeout
+from hamcrest import assert_that, equal_to, has_item, not_none
 from codemie_sdk import CodeMieClient
 from codemie_sdk.models.assistant import (
     ToolKitDetails,
@@ -32,6 +37,7 @@ from codemie_sdk.models.assistant import (
     ToolPermissionsConfig,
 )
 from codemie_sdk.models.datasource import DataSource
+from codemie_sdk.models.mcp_config import MCPConfigUpdateRequest
 from codemie_sdk.models.integration import (
     IntegrationType,
     CredentialValues,
@@ -72,9 +78,6 @@ from codemie_test_harness.tests.utils.assistant_utils import AssistantUtils
 from codemie_test_harness.tests.utils.base_utils import get_random_name, wait_for_entity
 from codemie_test_harness.tests.utils.client_factory import get_client
 from codemie_test_harness.tests.utils.customer_config_utils import CustomerConfigUtils
-from codemie_test_harness.tests.utils.marketplace_management_utils import (
-    MarketplaceManagementUtils,
-)
 from codemie_test_harness.tests.utils.constants import (
     FILES_PATH,
 )
@@ -88,6 +91,10 @@ from codemie_test_harness.tests.utils.env_resolver import (
 )
 from codemie_test_harness.tests.utils import cleanup_utils, production_safety
 from codemie_test_harness.tests.utils.gitbud_utils import GitBudUtils
+from codemie_test_harness.tests.utils.mcp_config_utils import McpConfigUtils
+from codemie_test_harness.tests.test_data.mcp_link_test_data import (
+    catalog_entry_create_request,
+)
 from codemie_test_harness.tests.utils.gitlab_seed import (
     GITLAB_SEED_FAKE_PNG_UPLOAD,
     GITLAB_SEED_IMAGE_UPLOAD,
@@ -105,14 +112,21 @@ from codemie_test_harness.tests.utils.github_seed import (
 from codemie_test_harness.tests.utils.github_utils import GitHubUtils
 from codemie_test_harness.tests.utils.azure_devops_seed import SeedPullRequest
 from codemie_test_harness.tests.utils.azure_devops_utils import AzureDevOpsUtils
+from codemie_test_harness.tests.utils.hosted_sharing_utils import HostedPeople
 from codemie_test_harness.tests.utils.http_utils import RequestHandler
 from codemie_test_harness.tests.utils.integration_utils import IntegrationUtils
+from codemie_test_harness.tests.utils.scoped_integration_factory import (
+    ScopedIntegrationFactory,
+)
 from codemie_test_harness.tests.utils.jira_seed import (
     SeedIssue,
     resolve_seeded,
     resolve_shared,
 )
 from codemie_test_harness.tests.utils.jira_utils import JiraUtils
+from codemie_test_harness.tests.utils.llm_model_status_utils import (
+    LlmModelStatusUtils,
+)
 from codemie_test_harness.tests.utils.cloud_seed import (
     SeedAwsBucket,
     SeedAzureResourceGroup,
@@ -145,7 +159,28 @@ from codemie_test_harness.tests.utils.project_budget_groups import ProjectBudget
 from codemie_test_harness.tests.utils.llm_utils import LLMUtils
 from codemie_test_harness.tests.utils.local_user_utils import LocalUserUtils
 from codemie_test_harness.tests.utils.ordered_users_utils import OrderedUsersBuilder
+from codemie_test_harness.tests.utils.user_lifecycle_utils import (
+    get_user_lifecycle_utils,
+    new_logged_in_user,
+    user_email,
+)
 from codemie_test_harness.tests.utils.logger_util import setup_logger
+from codemie_test_harness.tests.test_data.marketplace_approval_gate_test_data import (
+    CORE_GATE_MINIMUM,
+    CRITICAL,
+    DESCRIPTION_LENGTH_RULE,
+    PENDING_REVIEW,
+    VALID_REASON,
+    CoreGates,
+    build_marketplace_submission,
+    build_short_description,
+)
+from codemie_test_harness.tests.utils.marketplace_management_utils import (
+    personal_project_of,
+    MarketplaceManagementUtils,
+    MarketplaceSubmitter,
+    poll_marketplace_listing,
+)
 from codemie_test_harness.tests.utils.notification_utils import (
     GmailUtils,
     AzureEmailUtils,
@@ -255,6 +290,11 @@ def pytest_configure(config):
     config.option.timeout_method = (
         "thread" if platform.system() == "Windows" else "signal"
     )
+
+    # The controller takes a lease for the run; xdist workers inherit its id through the
+    # environment (see `marketplace_core_gates`).
+    if not hasattr(config, "workerinput"):
+        _start_core_gates_lease()
 
     # Resolve the root directory and .env file path
     _, root_dir = resolve_tests_path_and_root()
@@ -572,6 +612,40 @@ def workflow_utils(client):
 
 
 @pytest.fixture(scope="session")
+def mcp_config_utils(client):
+    return McpConfigUtils(client)
+
+
+@pytest.fixture
+def catalog_mcp_config(client):
+    """Factory: a public, active catalog MCP config used as an mcp_servers link target.
+
+    Deletes every config it created on teardown, unless the test already deleted it
+    (e.g. to simulate a dead ``mcp_config_id``); a repeat delete is swallowed.
+    """
+    created = []
+
+    def _create(name=None, is_public=True, is_active=True):
+        config = client.mcp_configs.create(
+            catalog_entry_create_request(name=name, is_public=is_public)
+        )
+        if not is_active:
+            config = client.mcp_configs.update(
+                config.id, MCPConfigUpdateRequest(is_active=False)
+            )
+        created.append(config)
+        return config
+
+    yield _create
+
+    for config in created:
+        try:
+            client.mcp_configs.delete(config.id)
+        except Exception:
+            pass
+
+
+@pytest.fixture(scope="session")
 def providers_utils(client):
     utils = ProviderUtils(client)
     yield utils
@@ -788,11 +862,6 @@ def clean_marketplace_thresholds(customer_config_utils):
 
 
 @pytest.fixture(scope="session")
-def marketplace_management_utils(client):
-    return MarketplaceManagementUtils(client)
-
-
-@pytest.fixture(scope="session")
 def categories_utils(client):
     return CategoriesUtils(client)
 
@@ -813,22 +882,117 @@ def ensure_test_project(admin_utils):
 
 @pytest.fixture(scope="session")
 def keycloak_utils(client):
-    """Session-scoped user-lifecycle helper. Uses LocalUserUtils on localhost, KeycloakUtils elsewhere."""
-    if EnvironmentResolver.is_localhost():
-        return LocalUserUtils(client)
-    return KeycloakUtils()
+    """Session-scoped user-lifecycle helper, chosen by domain: LocalUserUtils on
+    localhost and OSS standalone (local IdP), KeycloakUtils elsewhere."""
+    return get_user_lifecycle_utils(client)
 
 
 @pytest.fixture
-def disposable_user(keycloak_utils):
-    """Function-scoped fresh user; deleted automatically after each test.
+def hosted_people(keycloak_utils, admin_utils, user_utils, project_utils):
+    """Users and shared projects for a hosted-application test, API or UI, removed after it.
 
-    NOTE (localhost only): LocalUserUtils.create_test_user creates users with
-    is_admin=True.  On localhost TC-010 may therefore receive HTTP 200 instead
-    of 403, giving false assurance for the access-control scenario.
+    Each user keeps its password, so a browser can sign in as them; see ``HostedPeople``.
+    """
+    with contextlib.ExitStack() as cleanup:
+        yield HostedPeople(
+            cleanup, keycloak_utils, admin_utils, user_utils, project_utils
+        )
+
+
+# Role fixtures. Each yields a LoggedInUser (email, password, user_id, client) of a fresh
+# user, created through keycloak_utils (local IdP or Keycloak, by domain) and deleted after
+# the test. A test that needs two users of one role takes the second_* fixture as well.
+
+
+@pytest.fixture
+def platform_user(keycloak_utils):
+    """User with no platform role and no project beyond their own personal project."""
+    with new_logged_in_user(keycloak_utils, user_email("member"), admin=False) as user:
+        yield user
+
+
+@pytest.fixture
+def second_platform_user(keycloak_utils):
+    """A second platform_user, for tests that need two distinct ones."""
+    with new_logged_in_user(keycloak_utils, user_email("extra"), admin=False) as user:
+        yield user
+
+
+@pytest.fixture
+def admin_user(keycloak_utils, user_utils):
+    """User with the platform admin role (not maintainer)."""
+    with new_logged_in_user(keycloak_utils, user_email("admin"), admin=True) as user:
+        user_utils.update_admin_user(user.user_id, is_admin=True)
+        yield user
+
+
+@pytest.fixture
+def maintainer_user(keycloak_utils, user_utils):
+    """User with the maintainer flag only; the backend stores is_admin as true for it."""
+    with new_logged_in_user(
+        keycloak_utils, user_email("maintainer"), admin=False
+    ) as user:
+        user_utils.update_admin_user(user.user_id, is_maintainer=True)
+        UserUtils(user.client).wait_until_user_management_effective()
+        yield user
+
+
+@pytest.fixture(scope="module")
+def auditor_user(keycloak_utils, user_utils):
+    """User with the auditor flag only, shared within a module (and xdist worker).
+
+    Read/denial-only, so one per module avoids creating a user per parametrized case.
+    """
+    with new_logged_in_user(
+        keycloak_utils, user_email("cliauditor"), admin=False
+    ) as user:
+        user_utils.update_admin_user(user.user_id, is_auditor=True)
+        wait_until_auditor_effective(user.client)
+        yield user
+
+
+@pytest.fixture
+def project_admin_user(keycloak_utils, user_utils, default_project_member):
+    """platform_user made project admin of default_project_member's first project."""
+    with new_logged_in_user(
+        keycloak_utils, user_email("projadmin"), admin=False
+    ) as user:
+        user_utils.assign_user_to_project(
+            user.user_id, default_project_member.project_a, is_project_admin=True
+        )
+        yield user
+
+
+@pytest.fixture
+def fresh_project_admin_client(project_admin_user):
+    """A fresh login of project_admin_user, made after the project admin role was assigned.
+
+    The client of the fixture itself logged in before the assignment, so a backend that caches
+    the administered projects per token may still hold an empty list for it.
+    """
+    return get_client(
+        username=project_admin_user.email, password=project_admin_user.password
+    )
+
+
+@pytest.fixture
+def scoped_integrations():
+    """Factory for user and project integrations created as any client; deleted after the test."""
+    factory = ScopedIntegrationFactory()
+    yield factory
+    factory.delete_all()
+
+
+@pytest.fixture
+def mixed_case_personal_user(keycloak_utils):
+    """Function-scoped user whose email contains uppercase letters; deleted after each test.
+
+    Built with the same helper as `disposable_user` (keycloak_utils.create_test_user) and
+    logged in once (about_me), so the personal project is created under the application's
+    real (mixed-case) name rather than a lowercase orphan.
     """
     uid = secrets.token_hex(4)
-    email = f"autotest_user_{uid}@email.com"
+    email = f"AutoTest.Mixed.{uid}@Email.com"
     password = keycloak_utils.create_test_user(email=email, project_name=email)
     try:
         user_client = get_client(username=email, password=password)
@@ -847,6 +1011,32 @@ def disposable_user(keycloak_utils):
 
 
 @pytest.fixture
+def new_user_id_factory(user_utils):
+    """Factory for a fresh id to remap a disposable user onto.
+
+    A remap rewrites the row's own id, so the Keycloak-side cleanup `admin_user`
+    performs (by email, against the IDP) no longer reaches the backend row by its
+    original id. The SDK has no admin delete-user call, only deactivate, so this
+    factory best-effort deactivates the backend row at each id it handed out, after
+    the test; the row itself, and the original email it still carries, are left
+    behind in the backend permanently.
+    """
+    issued_ids = []
+
+    def _issue():
+        new_id = f"autotest-remap-{secrets.token_hex(6)}"
+        issued_ids.append(new_id)
+        return new_id
+
+    yield _issue
+    for issued_id in issued_ids:
+        try:
+            user_utils.deactivate_user(issued_id)
+        except Exception as e:
+            logger.warning(f"Failed to deactivate remapped user {issued_id}: {e}")
+
+
+@pytest.fixture
 def ordered_users(client, user_utils):
     """Factory: create the users of an OrderScenario with a per-run search token.
 
@@ -857,48 +1047,6 @@ def ordered_users(client, user_utils):
     builder = OrderedUsersBuilder(client, user_utils)
     yield builder.create
     builder.delete_all()
-
-
-@pytest.fixture
-def promoted_admin_user(keycloak_utils, user_utils):
-    uid = secrets.token_hex(4)
-    email = f"autotest_admin_{uid}@email.com"
-    password = keycloak_utils.create_test_user(email=email, project_name=email)
-    user_client = get_client(username=email, password=password)
-    user_id = user_client.users.about_me().user_id
-    user_utils.update_admin_user(user_id, is_admin=True)
-    yield email, user_id, user_client
-    keycloak_utils.delete_user(email)
-
-
-@pytest.fixture
-def non_admin_user(keycloak_utils):
-    """Function-scoped, genuinely non-privileged secondary user (developer
-    role only, no admin/maintainer rights; "applications" attribute is
-    exactly their own personal project), deleted after each test.
-
-    Intentionally does NOT reuse `disposable_user`: that fixture is built via
-    `keycloak_utils.create_test_user`, which grants the Keycloak "admin"
-    realm role (see `KeycloakUtils.create_test_user`), so it is not
-    genuinely non-privileged.
-    """
-    uid = secrets.token_hex(4)
-    email = f"autotest_member_{uid}@email.com"
-    password = keycloak_utils.create_platform_user(email=email)
-    member_client = get_client(username=email, password=password)
-    member_id = member_client.users.about_me().user_id
-    yield email, member_id, member_client
-    keycloak_utils.delete_user(email)
-
-
-@pytest.fixture(scope="function")
-def keycloak_regular_user(keycloak_utils):
-    """Create a plain developer-role user with no admin or project-admin permissions."""
-    uid = secrets.token_hex(4)
-    email = f"autotest_regular_{uid}@email.com"
-    password = keycloak_utils.create_platform_user(email=email)
-    yield email, password
-    keycloak_utils.delete_user(email)
 
 
 @pytest.fixture(scope="session")
@@ -931,10 +1079,14 @@ def _delete_projects_with_members(project_utils, project_names):
 
 @pytest.fixture
 def default_project_member(
-    request, non_admin_user, admin_utils, project_utils, user_utils
+    request, platform_user, admin_utils, project_utils, user_utils
 ):
     """Plain user (no platform role) who owns a personal project and is a member of two extra projects."""
-    email, user_id, member_client = non_admin_user
+    email, user_id, member_client = (
+        platform_user.email,
+        platform_user.user_id,
+        platform_user.client,
+    )
     project_names = []
     request.addfinalizer(
         lambda: _delete_projects_with_members(project_utils, project_names)
@@ -955,70 +1107,106 @@ def default_project_member(
 
 
 @pytest.fixture
-def admin_client(promoted_admin_user):
-    """Client of a user promoted to platform admin, once the role is active on all replicas."""
-    client = promoted_admin_user[2]
-    UserUtils(client).wait_until_user_management_effective()
-    return client
+def admin_client(admin_user):
+    """admin_user's client, once the role is active on all replicas."""
+    UserUtils(admin_user.client).wait_until_user_management_effective()
+    return admin_user.client
 
 
 @pytest.fixture
-def maintainer_credentials(request, keycloak_utils, user_utils):
-    """(email, password) of a user with the maintainer flag only (not a platform admin)."""
-    email = f"autotest_maintainer_{secrets.token_hex(4)}@email.com"
-    password = keycloak_utils.create_platform_user(email=email)
-    request.addfinalizer(lambda: keycloak_utils.delete_user(email))
-    client = get_client(username=email, password=password)
-    user_utils.update_admin_user(client.users.about_me().user_id, is_maintainer=True)
-    UserUtils(client).wait_until_user_management_effective()
-    return email, password
+def maintainer_client(maintainer_user):
+    """A fresh login of maintainer_user, made after the maintainer flag is set."""
+    return get_client(username=maintainer_user.email, password=maintainer_user.password)
 
 
 @pytest.fixture
-def maintainer_client(maintainer_credentials):
-    email, password = maintainer_credentials
-    return get_client(username=email, password=password)
+def orphaned_creator_budget(keycloak_utils, user_utils, client):
+    """Platform budget whose creator's backend record is deleted right after creation.
+
+    AC-7/AC-13: ``created_by`` keeps the (now unresolvable) id, so every endpoint that
+    returns ``created_by_name`` must come back falsy with no error. Deleting only the
+    identity-provider account is not enough — ``resolve_creator_names`` reads the backend's
+    own user table (``user_repository.aget_users_by_ids`` filters ``deleted_at IS NOT
+    NULL``), so the backend record is removed the same way ``LocalUserUtils.delete_user_by_id``
+    does; a Keycloak-only deletion was confirmed live to still show the creator's name.
+    The creator needs the maintainer flag to create a budget at all (``maintainer_access_only``
+    on ``POST /v1/admin/budgets``; a plain admin test user gets 403, confirmed live).
+    """
+    uid = secrets.token_hex(4)
+    with new_logged_in_user(
+        keycloak_utils, f"autotest_orphan_{uid}@email.com", admin=False
+    ) as user:
+        try:
+            user_utils.update_admin_user(user.user_id, is_maintainer=True)
+            UserUtils(user.client).wait_until_user_management_effective()
+            budget_id = f"autotest-orphan-{uid}"
+            AdminBudgetUtils(user.client).create_budget(budget_id, "platform")
+        finally:
+            # The backend row goes first; leaving the block then removes the auth-server user.
+            LocalUserUtils(client).delete_user_by_id(user.user_id)
+    return budget_id
 
 
 @pytest.fixture
-def project_admin_client(request, keycloak_utils, user_utils, default_project_member):
-    """Plain user who is project admin of the member's project, but holds no platform role."""
-    email = f"autotest_projadmin_{secrets.token_hex(4)}@email.com"
-    password = keycloak_utils.create_platform_user(email=email)
-    request.addfinalizer(lambda: keycloak_utils.delete_user(email))
-    client = get_client(username=email, password=password)
-    user_utils.assign_user_to_project(
-        client.users.about_me().user_id,
-        default_project_member.project_a,
-        is_project_admin=True,
+def manual_budget(maintainer_client, lite_llm_budget_utils):
+    """A manually created platform budget with no assigned users, owned by the maintainer.
+
+    Yields the created budget (``budget_id``, ``name``, ...). Only a maintainer creates,
+    updates and deletes budgets, so the teardown deletes it as that maintainer when the
+    test has not (a 404 or 409 is expected then) and removes any LiteLLM leftover.
+    """
+    budget_utils = AdminBudgetUtils(maintainer_client)
+    budget = budget_utils.create_budget(
+        f"autotest-del-{secrets.token_hex(4)}", "platform"
     )
-    return client
+    yield budget
+    with contextlib.suppress(HTTPError):
+        budget_utils.delete_budget(budget["budget_id"])
+    lite_llm_budget_utils.delete_budget(budget["budget_id"])
 
 
 @pytest.fixture
-def unrelated_client(request, keycloak_utils):
+def assign_budget_user(manual_budget, maintainer_client):
+    """Factory ``(user_id)``: assigns the user to ``manual_budget`` as their platform budget.
+
+    The assignments are removed before the budget is, whether or not the user still exists.
+    """
+    budget_utils = AdminBudgetUtils(maintainer_client)
+    assigned = []
+
+    def _assign(user_id: str):
+        budget_utils.assign_user_budget(user_id, "platform", manual_budget["budget_id"])
+        assigned.append(user_id)
+
+    yield _assign
+
+    for user_id in assigned:
+        with contextlib.suppress(HTTPError):
+            budget_utils.unassign_user_budget(user_id, "platform")
+
+
+@pytest.fixture
+def project_admin_client(project_admin_user):
+    """project_admin_user's client."""
+    return project_admin_user.client
+
+
+@pytest.fixture
+def unrelated_client(keycloak_utils):
     """Fresh plain user with no project membership beyond their own personal project."""
-    email = f"autotest_unrelated_{secrets.token_hex(4)}@email.com"
-    password = keycloak_utils.create_platform_user(email=email)
-    request.addfinalizer(lambda: keycloak_utils.delete_user(email))
-    return get_client(username=email, password=password)
+    with new_logged_in_user(
+        keycloak_utils, user_email("unrelated"), admin=False
+    ) as user:
+        yield user.client
 
 
 def _module_user_client(keycloak_utils, user_utils, label, **role):
     """Generator body of the module-scoped sender fixtures: optional global role, deleted at the end."""
-    email = f"autotest_{label}_{secrets.token_hex(4)}@email.com"
-    password = keycloak_utils.create_platform_user(email=email)
-    try:
-        client = get_client(username=email, password=password)
+    with new_logged_in_user(keycloak_utils, user_email(label), admin=False) as user:
         if role:
-            user_utils.update_admin_user(client.users.about_me().user_id, **role)
-            UserUtils(client).wait_until_user_management_effective()
-        yield client
-    finally:
-        try:
-            keycloak_utils.delete_user(email)
-        except Exception as e:
-            logger.warning(f"Failed to delete user {email}: {e}")
+            user_utils.update_admin_user(user.user_id, **role)
+            UserUtils(user.client).wait_until_user_management_effective()
+        yield user.client
 
 
 @pytest.fixture(scope="module")
@@ -1050,16 +1238,17 @@ def gate_outsider_client(keycloak_utils, user_utils):
 
 
 @pytest.fixture
-def verified_maintainer_client(maintainer_credentials, user_utils):
+def verified_maintainer_client(maintainer_user, user_utils):
     """Client of a user provisioned for this test through `create_platform_user` and promoted
-    ONLY to maintainer (see `maintainer_credentials`), never a pre-existing manual account.
+    ONLY to maintainer (see `maintainer_user`), never a pre-existing manual account.
     Asserts the principal and the stored roles. Only the maintainer flag is set by the test; the
     backend's role normalization (UserManagementService._normalize_role_updates: a maintainer
     update sets is_admin to true, "maintainer implies admin") stores is_admin as true, so that is
     the expected stored state, not a second promotion."""
-    email, password = maintainer_credentials
-    client = get_client(username=email, password=password)
-    assert_principal_is(client, email)
+    client = get_client(
+        username=maintainer_user.email, password=maintainer_user.password
+    )
+    assert_principal_is(client, maintainer_user.email)
     assert_stored_roles(
         user_utils, client.users.about_me().user_id, is_maintainer=True, is_admin=True
     )
@@ -1067,30 +1256,10 @@ def verified_maintainer_client(maintainer_credentials, user_utils):
 
 
 @pytest.fixture(scope="module")
-def cli_auditor_credentials(request, keycloak_utils, user_utils):
-    """Create one dedicated auditor per module/worker using the maintainer provisioning flow.
-
-    Unlike function-scoped maintainer_credentials, this read/denial-only role is shared within
-    a module to avoid creating one user per parametrized case. Each worker owns its account.
-    The administrative harness account creates the user and assigns only the auditor flag.
-    Register deletion before login/role setup so a setup failure also cleans up the user.
-    Shared AUDITOR_* credentials and the existing shared account are never used or modified.
-    """
-    email = f"autotest_cliauditor_{secrets.token_hex(4)}@email.com"
-    password = keycloak_utils.create_platform_user(email=email)
-    request.addfinalizer(lambda: keycloak_utils.delete_user(email))
-    client = get_client(username=email, password=password)
-    user_utils.update_admin_user(client.users.about_me().user_id, is_auditor=True)
-    wait_until_auditor_effective(client)
-    return email, password
-
-
-@pytest.fixture(scope="module")
-def verified_auditor_client(cli_auditor_credentials):
+def verified_auditor_client(auditor_user):
     """Verified client of the freshly provisioned auditor, never a shared configured user."""
-    username, password = cli_auditor_credentials
-    client = get_client(username=username, password=password)
-    assert_principal_is(client, username, not_admin=True)
+    client = get_client(username=auditor_user.email, password=auditor_user.password)
+    assert_principal_is(client, auditor_user.email, not_admin=True)
     assert_auditor_without_admin_roles(client)
     return client
 
@@ -1174,6 +1343,44 @@ def llm_utils(client):
 
 
 @pytest.fixture(scope="session")
+def llm_model_status_utils(client):
+    return LlmModelStatusUtils(client)
+
+
+@pytest.fixture
+def status_test_model(llm_model_status_utils, regular_client):
+    """An Enabled "(Autotest)" chat model whose status the test may change.
+
+    Only the dedicated test models are ever changed, never a regular model. The status
+    is platform-wide, so the model is put back to Enabled on teardown and tests using
+    it must carry ``xdist_group(name="model_status")``.
+    """
+    models = llm_model_status_utils.pick_autotest_models(1, regular_client)
+    if not models:
+        pytest.skip('No Enabled "(Autotest)" chat model on this stand')
+    yield models[0]
+    llm_model_status_utils.restore_enabled([models[0].base_name])
+
+
+@pytest.fixture
+def status_test_models(llm_model_status_utils, regular_client):
+    """Two Enabled "(Autotest)" chat models whose status the test may change (see ``status_test_model``)."""
+    models = llm_model_status_utils.pick_autotest_models(2, regular_client)
+    if len(models) < 2:
+        pytest.skip('Fewer than two Enabled "(Autotest)" chat models on this stand')
+    yield models
+    llm_model_status_utils.restore_enabled([m.base_name for m in models])
+
+
+@pytest.fixture
+def saved_global_default(llm_model_status_utils):
+    """The saved global default model (None when there is none); put back on teardown."""
+    saved = llm_model_status_utils.get_default().saved_base_name
+    yield saved
+    llm_model_status_utils.restore_default(saved)
+
+
+@pytest.fixture(scope="session")
 def conversation_utils(client):
     return ConversationUtils(client)
 
@@ -1229,6 +1436,21 @@ def invalid_gitlab_integration(integration_utils):
     integration = integration_utils.create_integration(
         credential_type=CredentialTypes.GIT,
         credential_values=CredentialsManager.invalid_gitlab_credentials(),
+    )
+    yield integration
+    if integration:
+        integration_utils.delete_integration(integration)
+
+
+@pytest.fixture(scope="session")
+def ms_exchange_integration(integration_utils):
+    """MS Exchange integration for workflow Tool-node tests (exchange_forward, exchange_send).
+
+    Dummy NTLM-path credentials — integration creation does not validate them live.
+    """
+    integration = integration_utils.create_integration(
+        credential_type=CredentialTypes.MS_EXCHANGE,
+        credential_values=CredentialsManager.ms_exchange_credentials(),
     )
     yield integration
     if integration:
@@ -1832,6 +2054,7 @@ def scheduler_integration(integration_utils):
         schedule: str = None,
         is_enabled: bool = True,
         timezone: str = None,
+        project_name: str = None,
     ):
         # If schedule is not provided, calculate cron for every hour starting at current time + 1 minute
         if schedule is None:
@@ -1849,7 +2072,10 @@ def scheduler_integration(integration_utils):
         if timezone is not None:
             credential_values.append(CredentialValues(key="timezone", value=timezone))
         integration = integration_utils.create_integration(
-            CredentialTypes.SCHEDULER, credential_values, integration_alias=alias
+            CredentialTypes.SCHEDULER,
+            credential_values,
+            integration_alias=alias,
+            project_name=project_name,
         )
         created_integrations.append(integration)
         return integration
@@ -2118,6 +2344,7 @@ def skill(skill_utils):
         content=None,
         visibility=None,
         categories=None,
+        mcp_servers=None,
     ):
         nonlocal created_skill
         from codemie_sdk.models.skill import SkillVisibility
@@ -2128,6 +2355,7 @@ def skill(skill_utils):
             content=content,
             visibility=visibility or SkillVisibility.PROJECT,
             categories=categories,
+            mcp_servers=mcp_servers,
         )
         return created_skill
 
@@ -2192,7 +2420,7 @@ def ownership_project(project, project_utils):
 
     Cascade cleanup of ``project`` only works while the creator is the owner, so the
     teardown gives ownership back before the cascade runs. Request the user fixtures a
-    test needs (``non_admin_user`` ...) before this one so those users outlive the
+    test needs (``platform_user`` ...) before this one so those users outlive the
     project teardown and can still be unassigned from it.
     """
     created = project()
@@ -2205,7 +2433,7 @@ def ownership_project(project, project_utils):
 
 @pytest.fixture(scope="function")
 def workflow(workflow_utils):
-    created_workflow: Optional[Workflow] = None
+    created_workflows: list[Workflow] = []
 
     def _create_workflow(
         workflow_name=None,
@@ -2225,7 +2453,6 @@ def workflow(workflow_utils):
 
         yaml_content = prepare_yaml_content(workflow_yaml.model_dump(exclude_none=True))
 
-        nonlocal created_workflow
         created_workflow = workflow_utils.create_workflow(
             workflow_name=workflow_name,
             workflow_type=WorkflowMode.SEQUENTIAL,
@@ -2234,11 +2461,20 @@ def workflow(workflow_utils):
             workflow_yaml=yaml_content,
             project_name=project_name,
         )
+        created_workflows.append(created_workflow)
         return created_workflow
 
     yield _create_workflow
-    if created_workflow:
-        workflow_utils.delete_workflow(created_workflow)
+    # A test may create several workflows and every one is deleted. A failure on the
+    # last one still fails the teardown, as before; an earlier one (a test may have
+    # deleted it itself) is logged so it cannot hide the cleanup of the others.
+    for created_workflow in created_workflows[:-1]:
+        try:
+            workflow_utils.delete_workflow(created_workflow)
+        except Exception as e:
+            logger.warning(f"Failed to delete workflow {created_workflow.id}: {e}")
+    if created_workflows:
+        workflow_utils.delete_workflow(created_workflows[-1])
 
 
 @pytest.fixture(scope="function")
@@ -2633,10 +2869,20 @@ def pytest_sessionfinish(session):
     alone. Skills are only scoped by created_by (matches every skill this
     TEST_USER created, across sessions — same as before this refactor,
     not narrowed further here). Providers and cost centers match a
-    structural name pattern, also session-agnostic. Jira/Confluence/ADO
+    structural name pattern, also session-agnostic — except that a cost
+    center still pinned to a project (409 on delete) gets one prefix-scoped
+    retry: see delete_cost_centers' own docstring. Jira/Confluence/ADO
     cleanup is intentionally NOT done here — see test_clean_all_entities
     for that.
+
+    OSS standalone only has integrations: assistants, skills, datasources,
+    workflows and cost centers don't exist there (404/403 on every call), so
+    those five are skipped outright instead of hitting the API and logging
+    an error every run.
     """
+    if not hasattr(session.config, "workerinput"):
+        _release_marketplace_core_gates()
+
     if CredentialsManager.get_parameter("CLEANUP_DATA", "true").lower() != "true":
         return
     if session.config.option.collectonly or getattr(session, "testscollected", 0) == 0:
@@ -2650,6 +2896,7 @@ def pytest_sessionfinish(session):
     client = get_client()
     prefix = autotest_entity_prefix
     common_filters = {"created_by": TEST_USER}
+    has_full_platform = not EnvironmentResolver.is_oss_standalone()
 
     try:
         cleanup_utils.delete_integrations(
@@ -2671,34 +2918,35 @@ def pytest_sessionfinish(session):
     except Exception as e:
         logger.error(f"Failed to clean up user integrations: {e}")
 
-    try:
-        cleanup_utils.delete_assistants(
-            client, {**common_filters, "search": prefix}, name_contains=prefix
-        )
-    except Exception as e:
-        logger.error(f"Failed to clean up assistants: {e}")
+    if has_full_platform:
+        try:
+            cleanup_utils.delete_assistants(
+                client, {**common_filters, "search": prefix}, name_contains=prefix
+            )
+        except Exception as e:
+            logger.error(f"Failed to clean up assistants: {e}")
 
-    try:
-        cleanup_utils.delete_skills(
-            client,
-            {**common_filters, "search": prefix},
-        )
-    except Exception as e:
-        logger.error(f"Failed to clean up skills: {e}")
+        try:
+            cleanup_utils.delete_skills(
+                client,
+                {**common_filters, "search": prefix},
+            )
+        except Exception as e:
+            logger.error(f"Failed to clean up skills: {e}")
 
-    try:
-        cleanup_utils.delete_datasources(
-            client, {**common_filters, "name": prefix}, name_contains=prefix
-        )
-    except Exception as e:
-        logger.error(f"Failed to clean up datasources: {e}")
+        try:
+            cleanup_utils.delete_datasources(
+                client, {**common_filters, "name": prefix}, name_contains=prefix
+            )
+        except Exception as e:
+            logger.error(f"Failed to clean up datasources: {e}")
 
-    try:
-        cleanup_utils.delete_workflows(
-            client, {**common_filters, "name": prefix}, name_contains=prefix
-        )
-    except Exception as e:
-        logger.error(f"Failed to clean up workflows: {e}")
+        try:
+            cleanup_utils.delete_workflows(
+                client, {**common_filters, "name": prefix}, name_contains=prefix
+            )
+        except Exception as e:
+            logger.error(f"Failed to clean up workflows: {e}")
 
     try:
         # search="autotest-" narrows the listing server-side (fast); the
@@ -2713,14 +2961,410 @@ def pytest_sessionfinish(session):
     except Exception as e:
         logger.error(f"Failed to clean up projects: {e}")
 
-    try:
-        cleanup_utils.delete_providers(client)
-    except Exception as e:
-        logger.error(f"Failed to cleanup providers: {e}")
+    if has_full_platform:
+        try:
+            cleanup_utils.delete_providers(client)
+        except Exception as e:
+            logger.error(f"Failed to cleanup providers: {e}")
 
-    try:
-        cleanup_utils.delete_cost_centers(client)
-    except Exception as e:
-        logger.error(f"Failed to cleanup cost centers: {e}")
+        try:
+            cleanup_utils.delete_cost_centers(client, prefix=prefix)
+        except Exception as e:
+            logger.error(f"Failed to cleanup cost centers: {e}")
 
     logger.info("Session cleanup completed.")
+
+
+# ---------------------------------------------------------------------------
+# Marketplace admin approval gate
+# ---------------------------------------------------------------------------
+
+
+_CORE_GATES_RUN_ENV = "MARKETPLACE_CORE_GATES_RUN_ID"
+_CORE_GATES_DIR = Path(tempfile.gettempdir()) / "marketplace-core-gates"
+_core_gates_lease: Optional[FileLock] = None
+
+
+def _core_gates_run_id() -> Optional[str]:
+    return os.environ.get(_CORE_GATES_RUN_ENV)
+
+
+def _core_gates_lease_path(run_id: str) -> Path:
+    return _CORE_GATES_DIR / f"lease-{run_id}.lock"
+
+
+def _core_gates_mutex() -> FileLock:
+    return FileLock(str(_CORE_GATES_DIR / "state.lock"), timeout=120)
+
+
+def _read_core_gates_state() -> Optional[dict]:
+    try:
+        return json.loads((_CORE_GATES_DIR / "state.json").read_text())
+    except FileNotFoundError:
+        return None
+
+
+def _write_core_gates_state(state: dict) -> None:
+    (_CORE_GATES_DIR / "state.json").write_text(json.dumps(state))
+
+
+def _start_core_gates_lease() -> None:
+    """Take the lease for this run and hold it until the process ends.
+
+    The operating system drops the lock when the process dies, even after SIGKILL, so
+    a later run can tell a finished run from a running one by trying to take the lease.
+    """
+    global _core_gates_lease
+    run_id = uuid.uuid4().hex
+    _CORE_GATES_DIR.mkdir(parents=True, exist_ok=True)
+    _core_gates_lease = FileLock(str(_core_gates_lease_path(run_id)))
+    _core_gates_lease.acquire()
+    os.environ[_CORE_GATES_RUN_ENV] = run_id
+
+
+def _core_gates_lease_is_held(run_id: str) -> bool:
+    probe = FileLock(str(_core_gates_lease_path(run_id)))
+    try:
+        probe.acquire(timeout=0)
+    except Timeout:
+        return True
+    probe.release()
+    with contextlib.suppress(OSError):
+        _core_gates_lease_path(run_id).unlink(missing_ok=True)
+    return False
+
+
+def _live_core_gates_runs(state: dict, exclude: str) -> List[str]:
+    """Runs recorded in the state, other than `exclude`, whose process is still alive."""
+    return [
+        run_id
+        for run_id in state["runs"]
+        if run_id != exclude and _core_gates_lease_is_held(run_id)
+    ]
+
+
+def _release_marketplace_core_gates() -> None:
+    """Give up this run's claim on the Core Gates override; runs once per run.
+
+    Called from `pytest_sessionfinish` of the controller (or of the only process without
+    xdist), after every worker has finished. The last live run puts the setting back as
+    it was before the first run changed it, so a run that overlaps with another one
+    never takes the thresholds away from it. A state left by a run that was killed has
+    no live runs, so it is repaired here or by the next run that uses the thresholds.
+    """
+    run_id = _core_gates_run_id()
+    if run_id is None:
+        return
+    try:
+        with _core_gates_mutex():
+            state = _read_core_gates_state()
+            if state is None:
+                return
+            state["runs"] = _live_core_gates_runs(state, exclude=run_id)
+            if state["runs"]:
+                _write_core_gates_state(state)
+                return
+            original = state["original"]
+            try:
+                utils = MarketplaceManagementUtils(get_client())
+                if utils.get_core_gates_setting() != original:
+                    utils.restore_core_gates_setting(original)
+                    logger.info(f"Marketplace core gates restored to {original}")
+                (_CORE_GATES_DIR / "state.json").unlink(missing_ok=True)
+            except Exception as e:
+                _write_core_gates_state(state)
+                logger.error(
+                    f"Failed to restore the marketplace core gates (they were {original}); "
+                    f"the next run will try again: {e}"
+                )
+    finally:
+        if _core_gates_lease is not None:
+            _core_gates_lease.release()
+        with contextlib.suppress(OSError):
+            _core_gates_lease_path(run_id).unlink(missing_ok=True)
+
+
+@pytest.fixture(scope="session")
+def marketplace_core_gates(client) -> CoreGates:
+    """The core gate thresholds the marketplace tests build their data from.
+
+    Production: the thresholds are only read and never changed. Any other stand: the
+    run records itself and, if no earlier run left a record, the setting as it was
+    (overridden or not, and its value); then the thresholds are set to CORE_GATE_MINIMUM
+    if they differ. A record left by a run that was killed is kept, so its original
+    value is not mistaken for the stand's own. `_release_marketplace_core_gates` puts the
+    setting back once no live run needs it. Either way the result is what the stand
+    reports now, so the tests need no checks of their own.
+    """
+    utils = MarketplaceManagementUtils(client)
+    if EnvironmentResolver.is_production():
+        return CoreGates.from_config(utils.get_gates_config())
+    run_id = _core_gates_run_id()
+    if run_id is None:
+        gates = utils.ensure_core_gates(
+            CORE_GATE_MINIMUM, CORE_GATE_MINIMUM, CORE_GATE_MINIMUM
+        )
+    else:
+        with _core_gates_mutex():
+            state = _read_core_gates_state() or {
+                "original": utils.get_core_gates_setting(),
+                "runs": [],
+            }
+            state["runs"] = [*_live_core_gates_runs(state, exclude=run_id), run_id]
+            _write_core_gates_state(state)
+            gates = utils.ensure_core_gates(
+                CORE_GATE_MINIMUM, CORE_GATE_MINIMUM, CORE_GATE_MINIMUM
+            )
+    return CoreGates.from_config(gates)
+
+
+@pytest.fixture(scope="session")
+def marketplace_short_description(marketplace_core_gates) -> str:
+    """A description one character below the stand's description_min, for CRITICAL findings."""
+    return build_short_description(marketplace_core_gates)
+
+
+@pytest.fixture(scope="session")
+def marketplace_management_utils(client, marketplace_core_gates):
+    """Marketplace-management endpoints called as the harness admin user."""
+    return MarketplaceManagementUtils(client)
+
+
+def _marketplace_persona_mode() -> bool:
+    """True when the submitter is the static persona instead of a user made in Keycloak.
+
+    Always on production (no users are created there). `MARKETPLACE_SUBMITTER_PERSONA=true`
+    switches it on elsewhere, only so the persona path can be verified on a preview stand.
+    """
+    return (
+        EnvironmentResolver.is_production()
+        or str(
+            CredentialsManager.get_parameter("MARKETPLACE_SUBMITTER_PERSONA", "false")
+        ).lower()
+        == "true"
+    )
+
+
+def _persona_submitter(llm_model: str) -> MarketplaceSubmitter:
+    """The existing non-admin persona (AUTH_USERNAME_DEFAULT) as the submitter.
+
+    Never falls back to the admin account: an admin's publish skips the review queue, so
+    a missing or admin persona fails here with a message instead of queuing nothing.
+    The assistants go to the persona's own personal project, found from its profile (the
+    login name when the profile names none).
+    """
+    username = CredentialsManager.get_parameter("AUTH_USERNAME_DEFAULT")
+    password = CredentialsManager.get_parameter("AUTH_PASSWORD_DEFAULT")
+    assert_that(
+        bool(username and password),
+        equal_to(True),
+        "AUTH_USERNAME_DEFAULT / AUTH_PASSWORD_DEFAULT are not set: the marketplace "
+        "submitter persona is unavailable",
+    )
+    assert_that(
+        username == CredentialsManager.get_parameter("AUTH_USERNAME"),
+        equal_to(False),
+        "AUTH_USERNAME_DEFAULT is the admin account; a submitter must be a plain user, "
+        "because an admin's publish skips the review queue",
+    )
+    user_client = get_client(username=username, password=password)
+    assert_principal_is(user_client, username, not_admin=True)
+    project = personal_project_of(user_client.users.about_me()) or username
+    return MarketplaceSubmitter(
+        username, password, user_client, llm_model, project=project
+    )
+
+
+@pytest.fixture(scope="module")
+def marketplace_submitter(request, default_llm, marketplace_core_gates):
+    """A plain user (no admin or maintainer role) who owns and submits assistants.
+
+    Created once per module and worker; the role is verified so that a stand that
+    makes every user an admin fails here instead of passing the refusal checks.
+    On production, and wherever `MARKETPLACE_SUBMITTER_PERSONA=true` (a switch that
+    exists only to verify the persona path on a preview stand), the user is the static
+    persona AUTH_USERNAME_DEFAULT: nothing is created or deleted in Keycloak.
+    Depends on `marketplace_core_gates`, so every assistant factory built on it runs
+    after the gate thresholds are set.
+    """
+    if _marketplace_persona_mode():
+        yield _persona_submitter(default_llm.base_name)
+        return
+    keycloak_utils = request.getfixturevalue("keycloak_utils")
+    with new_logged_in_user(
+        keycloak_utils, user_email("submitter"), admin=False
+    ) as user:
+        assert_principal_is(user.client, user.email, not_admin=True)
+        yield MarketplaceSubmitter(
+            user.email, user.password, user.client, default_llm.base_name
+        )
+
+
+def _delete_submitter_assistant(submitter, admin_client, assistant_id) -> None:
+    """Delete an assistant of the submitter in any review state (pending, rejected, approved).
+
+    The owner deletes it; the admin client is the fallback. A failure of both is logged as
+    an error, because the assistant is then left behind.
+    """
+    try:
+        submitter.assistant_utils.delete_assistant_by_id(assistant_id)
+    except Exception:
+        try:
+            admin_client.assistants.delete(assistant_id)
+        except Exception as e:
+            logger.error(f"Failed to delete assistant {assistant_id}: {e}")
+
+
+@pytest.fixture
+def marketplace_assistants_to_delete(marketplace_submitter, client):
+    """Collects the assistants a test creates for the submitter and deletes them on teardown."""
+    created = []
+    yield created
+    for assistant in created:
+        _delete_submitter_assistant(marketplace_submitter, client, assistant.id)
+
+
+@pytest.fixture
+def delete_marketplace_assistant(
+    marketplace_submitter, client, marketplace_assistants_to_delete
+):
+    """Deletes an assistant right away (for one that is public) and drops it from the teardown list."""
+
+    def _delete(assistant) -> None:
+        _delete_submitter_assistant(marketplace_submitter, client, assistant.id)
+        marketplace_assistants_to_delete.remove(assistant)
+
+    return _delete
+
+
+@pytest.fixture
+def draft_assistant(
+    marketplace_submitter, marketplace_assistants_to_delete, marketplace_core_gates
+):
+    """Factory: an assistant of the submitter that was never published."""
+
+    def _create(name=None, categories=None, mcp_servers=None):
+        assistant = marketplace_submitter.create_assistant(
+            build_marketplace_submission(
+                marketplace_core_gates,
+                name=name,
+                categories=categories,
+                mcp_servers=mcp_servers,
+            )
+        )
+        marketplace_assistants_to_delete.append(assistant)
+        return assistant
+
+    return _create
+
+
+@pytest.fixture
+def pending_assistant(
+    marketplace_submitter, marketplace_assistants_to_delete, draft_assistant
+):
+    """Factory: an assistant the submitter published, waiting in the review queue."""
+
+    def _create(name=None, categories=None, mcp_servers=None):
+        assistant = draft_assistant(
+            name=name, categories=categories, mcp_servers=mcp_servers
+        )
+        marketplace_submitter.submit_for_review(assistant)
+        return assistant
+
+    return _create
+
+
+@pytest.fixture
+def critical_pending_assistant(
+    pending_assistant,
+    marketplace_submitter,
+    marketplace_management_utils,
+    marketplace_short_description,
+):
+    """Factory: a queued assistant whose live gate recompute reports a CRITICAL finding.
+
+    The publish route refuses CRITICAL content from a plain user, but the gates are
+    recomputed on every read of the queue, so shortening the description after the
+    submission produces the finding while the assistant stays PENDING_REVIEW.
+    """
+
+    def _create(name=None, categories=None):
+        assistant = pending_assistant(name=name, categories=categories)
+        marketplace_submitter.edit_description(assistant, marketplace_short_description)
+        detail = marketplace_management_utils.get_detail(assistant.id)
+        assert_that(
+            [
+                finding.rule
+                for finding in detail.gate_findings
+                if finding.severity == CRITICAL
+            ],
+            has_item(DESCRIPTION_LENGTH_RULE),
+            "the edited description must make the gate recompute report a CRITICAL finding",
+        )
+        assert_that(detail.marketplace_status, equal_to(PENDING_REVIEW))
+        return assistant
+
+    return _create
+
+
+@pytest.fixture
+def approved_assistant(
+    pending_assistant, marketplace_management_utils, assistant_utils
+):
+    """Factory: an assistant the admin approved (APPROVED, verified, in the marketplace).
+
+    Returns once the marketplace listing shows the assistant: indexing runs in the
+    background after the approval, and the UI tests look for the card straight away.
+    """
+
+    def _create(name=None, categories=None):
+        assistant = pending_assistant(name=name, categories=categories)
+        version = marketplace_management_utils.get_detail(
+            assistant.id
+        ).marketplace_version
+        marketplace_management_utils.approve(assistant.id, expected_version=version)
+        listed = poll_marketplace_listing(assistant_utils, assistant.id, listed=True)
+        assert_that(
+            listed,
+            has_item(assistant.id),
+            "the approved assistant did not appear in the marketplace listing in time",
+        )
+        return assistant
+
+    return _create
+
+
+@pytest.fixture
+def rejected_assistant(pending_assistant, marketplace_management_utils):
+    """Factory: an assistant the admin rejected with a reason (kept on `decision_reason`)."""
+
+    def _create(name=None, categories=None, reason=VALID_REASON):
+        assistant = pending_assistant(name=name, categories=categories)
+        version = marketplace_management_utils.get_detail(
+            assistant.id
+        ).marketplace_version
+        marketplace_management_utils.reject(
+            assistant.id, reason, expected_version=version
+        )
+        assistant.decision_reason = reason
+        return assistant
+
+    return _create
+
+
+@pytest.fixture
+def assistant_in_marketplace_state(
+    draft_assistant, pending_assistant, rejected_assistant, approved_assistant
+):
+    """Factory: one assistant of the submitter in the given state (draft, pending, rejected, verified)."""
+    factories = {
+        "draft": draft_assistant,
+        "pending": pending_assistant,
+        "rejected": rejected_assistant,
+        "verified": approved_assistant,
+    }
+
+    def _create(state):
+        return factories[state]()
+
+    return _create

@@ -83,20 +83,32 @@ class KeycloakUtils:
             "Content-Type": "application/json",
         }
 
-    def create_test_user(self, email: str, project_name: str) -> str:
-        return self._create_user(email, project_name, role_names=("developer", "admin"))
+    def create_test_user(
+        self, email: str, project_name: str, username: str | None = None
+    ) -> str:
+        """Create a platform admin; the login name is the e-mail unless `username` is given."""
+        return self._create_user(
+            email, project_name, role_names=("developer", "admin"), username=username
+        )
 
     def create_platform_user(self, email: str) -> str:
         """Create a user with developer role only (no platform admin)."""
         return self._create_user(email, email, role_names=("developer",))
 
-    def _create_user(self, email: str, project_name: str, role_names: tuple) -> str:
+    def _create_user(
+        self,
+        email: str,
+        project_name: str,
+        role_names: tuple,
+        username: str | None = None,
+        extra_attributes: dict[str, list[str]] | None = None,
+    ) -> str:
         password = self._generate_password()
         headers = self._get_headers()
 
         create_url = f"{self._server_url}admin/realms/{self._realm}/users"
         user_payload = {
-            "username": email,
+            "username": username or email,
             "email": email,
             "firstName": "AutoTest",
             "lastName": email.split("@")[0],
@@ -140,6 +152,7 @@ class KeycloakUtils:
         attributes["applications"] = (
             [email, project_name] if project_name != email else [email]
         )
+        attributes.update(extra_attributes or {})
         user_data["attributes"] = attributes
 
         put_user_response = self._session.put(
@@ -148,6 +161,19 @@ class KeycloakUtils:
         put_user_response.raise_for_status()
 
         return password
+
+    def create_external_user(self, email: str) -> str:
+        """Create a user with developer role only whose ``user_type`` attribute is ``external``.
+
+        The platform reads the attribute as the ``user_type`` claim of the user's token, so the
+        account counts as an external user from its first sign-in.
+        """
+        return self._create_user(
+            email,
+            email,
+            role_names=("developer",),
+            extra_attributes={"user_type": ["external"]},
+        )
 
     def delete_user(self, email: str) -> None:
         headers = self._get_headers()
@@ -165,6 +191,39 @@ class KeycloakUtils:
         delete_url = f"{self._server_url}admin/realms/{self._realm}/users/{user_id}"
         delete_response = self._session.delete(delete_url, headers=headers)
         delete_response.raise_for_status()
+
+    def set_profile_name(self, email: str, first_name: str, last_name: str) -> None:
+        """Set a user's Keycloak firstName/lastName directly (admin REST API).
+
+        These feed the OIDC 'name' claim (Keycloak's full-name mapper) that the backend's
+        AuthenticationService.sync_idp_user_profile (src/codemie/service/user/
+        authentication_service.py, sync_idp_user_profile / _sync_existing_user) writes into
+        UserDB.name on every authenticated request once IDP_PROVIDER != "local" — so
+        updating the backend's own `name` field via the admin API has no lasting effect
+        once that sync runs again: the very next authenticated call that user makes
+        overwrites it back to whatever these Keycloak claims resolve to. Call this before
+        the target user's client makes its first authenticated call.
+        """
+        headers = self._get_headers()
+        search_url = f"{self._server_url}admin/realms/{self._realm}/users"
+        search_response = self._session.get(
+            search_url, params={"email": email}, headers=headers
+        )
+        search_response.raise_for_status()
+        users = search_response.json()
+        if not users:
+            raise RuntimeError(f"Keycloak user with email {email!r} not found")
+        user_id = users[0]["id"]
+
+        get_user_url = f"{self._server_url}admin/realms/{self._realm}/users/{user_id}"
+        get_response = self._session.get(get_user_url, headers=headers)
+        get_response.raise_for_status()
+        user_data = get_response.json()
+        user_data["firstName"] = first_name
+        user_data["lastName"] = last_name
+
+        put_response = self._session.put(get_user_url, json=user_data, headers=headers)
+        put_response.raise_for_status()
 
     def ensure_seed(self) -> SeedUser:
         """Return the seed user, creating it on first use.

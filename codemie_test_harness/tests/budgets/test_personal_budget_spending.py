@@ -12,16 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import datetime
 import logging
 
 import pytest
-from hamcrest import assert_that, close_to, equal_to, greater_than, none, not_none
+from hamcrest import assert_that, close_to, equal_to, greater_than, not_none
 
 from codemie_test_harness.tests.test_data.budget_test_data import (
     budget_chat_prompt,
     CLI_CLIENT_HEADER,
     DEFAULT_CLI_BUDGET_ID,
+    DEFAULT_PLATFORM_BUDGET_ID,
     DEFAULT_PREMIUM_BUDGET_ID,
     PREMIUM_MODEL,
 )
@@ -38,8 +38,9 @@ def test_chat_spending_recorded_in_default_budget(
     user_assistant,
     user_assistant_utils,
     user_budget_utils,
+    user_id,
     lite_llm_budget_utils,
-    admin_spend_tracking_utils,
+    admin_project_utils,
 ):
     email, _ = keycloak_user
     assistant = user_assistant(project_name=email)
@@ -66,30 +67,32 @@ def test_chat_spending_recorded_in_default_budget(
     assert_that(platform_row, not_none(), f"No budget row for {email}")
 
     assert_that(
-        lite_llm_budget_utils.get_customer_info(f"{email}_{DEFAULT_PREMIUM_BUDGET_ID}"),
-        none(),
-        f"Premium models LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(
+            f"{email}_{DEFAULT_PREMIUM_BUDGET_ID}"
+        ),
+        equal_to(0),
+        f"Premium models LiteLLM customer should have no spend for {email}",
     )
     assert_that(
-        lite_llm_budget_utils.get_customer_info(f"{email}_{DEFAULT_CLI_BUDGET_ID}"),
-        none(),
-        f"CLI LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(f"{email}_{DEFAULT_CLI_BUDGET_ID}"),
+        equal_to(0),
+        f"CLI LiteLLM customer should have no spend for {email}",
     )
 
-    logger.info("Triggering spend collection")
-    admin_spend_tracking_utils.collect_spends_nowait()
-
-    logger.info(
-        "Waiting for platform spend in project_spend_tracking (project=%s)", email
-    )
-    today = datetime.date.today()
-    spends = admin_spend_tracking_utils.wait_for_project_spends(
-        email, today, today, "platform"
+    logger.info("Waiting for platform budget spend in ledger (user=%s)", email)
+    assignment = admin_project_utils.wait_for_member_budget_spending_above(
+        DEFAULT_PLATFORM_BUDGET_ID,
+        "platform",
+        float(customer["spend"]) - 0.0001,
+        user_id=user_id,
     )
     assert_that(
-        spends["total_spend"],
+        assignment, not_none(), "Platform budget assignment not found in spend ledger"
+    )
+    assert_that(
+        assignment.current_spending,
         close_to(float(customer["spend"]), 0.0001),
-        "project_spend_tracking total_spend should match personal platform spending.",
+        "Platform budget current_spending should match personal platform spending.",
     )
 
 
@@ -101,8 +104,9 @@ def test_chat_spending_recorded_in_premium_model_budget(
     keycloak_user,
     user_proxy_utils,
     user_budget_utils,
+    user_id,
     lite_llm_budget_utils,
-    admin_spend_tracking_utils,
+    admin_project_utils,
 ):
     email, _ = keycloak_user
 
@@ -130,30 +134,32 @@ def test_chat_spending_recorded_in_premium_model_budget(
     assert_that(premium_row, not_none(), f"No premium budget row for {email}")
 
     assert_that(
-        lite_llm_budget_utils.get_customer_info(email),
-        none(),
-        f"Platform LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(email),
+        equal_to(0),
+        f"Platform LiteLLM customer should have no spend for {email}",
     )
     assert_that(
-        lite_llm_budget_utils.get_customer_info(f"{email}_{DEFAULT_CLI_BUDGET_ID}"),
-        none(),
-        f"CLI LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(f"{email}_{DEFAULT_CLI_BUDGET_ID}"),
+        equal_to(0),
+        f"CLI LiteLLM customer should have no spend for {email}",
     )
 
-    logger.info("Triggering spend collection")
-    admin_spend_tracking_utils.collect_spends_nowait()
-
-    logger.info(
-        "Waiting for premium_models spend in project_spend_tracking (project=%s)", email
-    )
-    today = datetime.date.today()
-    spends = admin_spend_tracking_utils.wait_for_project_spends(
-        email, today, today, "premium_models"
+    logger.info("Waiting for premium_models budget spend in ledger (user=%s)", email)
+    assignment = admin_project_utils.wait_for_member_budget_spending_above(
+        DEFAULT_PREMIUM_BUDGET_ID,
+        "premium_models",
+        float(customer["spend"]) - 0.0001,
+        user_id=user_id,
     )
     assert_that(
-        spends["total_spend"],
+        assignment,
+        not_none(),
+        "Premium models budget assignment not found in spend ledger",
+    )
+    assert_that(
+        assignment.current_spending,
         close_to(float(customer["spend"]), 0.0001),
-        "project_spend_tracking total_spend should match personal premium_models spending.",
+        "Premium models budget current_spending should match personal premium_models spending.",
     )
 
 
@@ -166,8 +172,9 @@ def test_chat_spending_recorded_in_cli_budget(
     default_llm,
     user_proxy_utils,
     user_budget_utils,
+    user_id,
     lite_llm_budget_utils,
-    admin_spend_tracking_utils,
+    admin_project_utils,
 ):
     email, _ = keycloak_user
 
@@ -195,28 +202,29 @@ def test_chat_spending_recorded_in_cli_budget(
     assert_that(cli_row, not_none(), f"No CLI budget row for {email}")
 
     assert_that(
-        lite_llm_budget_utils.get_customer_info(email),
-        none(),
-        f"Platform LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(email),
+        equal_to(0),
+        f"Platform LiteLLM customer should have no spend for {email}",
     )
     assert_that(
-        lite_llm_budget_utils.get_customer_info(f"{email}_{DEFAULT_PREMIUM_BUDGET_ID}"),
-        none(),
-        f"Premium models LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(
+            f"{email}_{DEFAULT_PREMIUM_BUDGET_ID}"
+        ),
+        equal_to(0),
+        f"Premium models LiteLLM customer should have no spend for {email}",
     )
 
-    logger.info("Triggering spend collection")
-    admin_spend_tracking_utils.collect_spends_nowait()
-
-    logger.info("Waiting for CLI spend in project_spend_tracking (project=%s)", email)
-    today = datetime.date.today()
-    spends = admin_spend_tracking_utils.wait_for_project_spends(
-        email, today, today, "cli"
+    logger.info("Waiting for cli budget spend in ledger (user=%s)", email)
+    assignment = admin_project_utils.wait_for_member_budget_spending_above(
+        DEFAULT_CLI_BUDGET_ID, "cli", float(customer["spend"]) - 0.0001, user_id=user_id
     )
     assert_that(
-        spends["total_spend"],
+        assignment, not_none(), "CLI budget assignment not found in spend ledger"
+    )
+    assert_that(
+        assignment.current_spending,
         close_to(float(customer["spend"]), 0.0001),
-        "project_spend_tracking total_spend should match personal CLI spending.",
+        "CLI budget current_spending should match personal CLI spending.",
     )
 
 
@@ -250,19 +258,21 @@ def test_chat_spending_recorded_on_litellm_key_for_platform_request(
     assert_that(float(key_info["spend"]), greater_than(0))
 
     assert_that(
-        lite_llm_budget_utils.get_customer_info(email),
-        none(),
-        f"Platform LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(email),
+        equal_to(0),
+        f"Platform LiteLLM customer should have no spend for {email}",
     )
     assert_that(
-        lite_llm_budget_utils.get_customer_info(f"{email}_{DEFAULT_PREMIUM_BUDGET_ID}"),
-        none(),
-        f"Premium models LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(
+            f"{email}_{DEFAULT_PREMIUM_BUDGET_ID}"
+        ),
+        equal_to(0),
+        f"Premium models LiteLLM customer should have no spend for {email}",
     )
     assert_that(
-        lite_llm_budget_utils.get_customer_info(f"{email}_{DEFAULT_CLI_BUDGET_ID}"),
-        none(),
-        f"CLI LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(f"{email}_{DEFAULT_CLI_BUDGET_ID}"),
+        equal_to(0),
+        f"CLI LiteLLM customer should have no spend for {email}",
     )
 
 
@@ -296,19 +306,21 @@ def test_chat_spending_recorded_on_litellm_key_for_premium_model(
     assert_that(float(key_info["spend"]), greater_than(0))
 
     assert_that(
-        lite_llm_budget_utils.get_customer_info(email),
-        none(),
-        f"Platform LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(email),
+        equal_to(0),
+        f"Platform LiteLLM customer should have no spend for {email}",
     )
     assert_that(
-        lite_llm_budget_utils.get_customer_info(f"{email}_{DEFAULT_PREMIUM_BUDGET_ID}"),
-        none(),
-        f"Premium models LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(
+            f"{email}_{DEFAULT_PREMIUM_BUDGET_ID}"
+        ),
+        equal_to(0),
+        f"Premium models LiteLLM customer should have no spend for {email}",
     )
     assert_that(
-        lite_llm_budget_utils.get_customer_info(f"{email}_{DEFAULT_CLI_BUDGET_ID}"),
-        none(),
-        f"CLI LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(f"{email}_{DEFAULT_CLI_BUDGET_ID}"),
+        equal_to(0),
+        f"CLI LiteLLM customer should have no spend for {email}",
     )
 
 
@@ -343,17 +355,19 @@ def test_chat_spending_recorded_on_litellm_key_for_cli_request(
     assert_that(float(key_info["spend"]), greater_than(0))
 
     assert_that(
-        lite_llm_budget_utils.get_customer_info(email),
-        none(),
-        f"Platform LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(email),
+        equal_to(0),
+        f"Platform LiteLLM customer should have no spend for {email}",
     )
     assert_that(
-        lite_llm_budget_utils.get_customer_info(f"{email}_{DEFAULT_PREMIUM_BUDGET_ID}"),
-        none(),
-        f"Premium models LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(
+            f"{email}_{DEFAULT_PREMIUM_BUDGET_ID}"
+        ),
+        equal_to(0),
+        f"Premium models LiteLLM customer should have no spend for {email}",
     )
     assert_that(
-        lite_llm_budget_utils.get_customer_info(f"{email}_{DEFAULT_CLI_BUDGET_ID}"),
-        none(),
-        f"CLI LiteLLM customer should not exist for {email}",
+        lite_llm_budget_utils.get_customer_spend(f"{email}_{DEFAULT_CLI_BUDGET_ID}"),
+        equal_to(0),
+        f"CLI LiteLLM customer should have no spend for {email}",
     )
