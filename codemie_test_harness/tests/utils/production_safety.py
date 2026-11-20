@@ -17,8 +17,9 @@
 Three rules, all failing closed:
 
 - State-changing CLI Analytics tests (projects, users, ingested telemetry that cannot be
-  deleted) run only on a stand known not to be Production or Preview. An unrecognised
-  host counts as Production unless CLI_ANALYTICS_ALLOW_STATE_CHANGES=true says otherwise.
+  deleted) never run on Production. An unrecognised host counts as Production unless
+  CLI_ANALYTICS_ALLOW_STATE_CHANGES=true says otherwise; Preview and the known test stands
+  run them.
 - Tests that seed synthetic telemetry into the totals they assert additionally require
   CLI_ANALYTICS_DISPOSABLE_ENVIRONMENT=true: a host name is not proof of isolation.
 - A read-only test (marked both cli_analytics and prod_regression) runs behind a transport guard
@@ -78,12 +79,10 @@ def state_change_refusal() -> Optional[str]:
         return str(error)
     if environment.is_production:
         return "the stand is Production"
-    if environment.is_preview:
-        return "the stand is Preview"
     if environment is Environment.UNKNOWN and not _setting_enabled(ALLOW_STATE_CHANGES):
         return (
             "the stand is not recognised as a test stand; set "
-            f"{ALLOW_STATE_CHANGES}=true if it is not Production or Preview"
+            f"{ALLOW_STATE_CHANGES}=true if it is not Production"
         )
     return None
 

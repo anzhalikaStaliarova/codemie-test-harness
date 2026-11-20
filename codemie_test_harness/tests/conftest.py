@@ -354,8 +354,8 @@ def pytest_collection_modifyitems(config, items):
     3. Users don't need to manually add marker filters
 
     CLI Analytics tests that are not marked 'prod_regression' create projects and users or
-    ingest telemetry that cannot be deleted. They are skipped unless the stand is known not to
-    be Production or Preview (see production_safety.state_change_refusal).
+    ingest telemetry that cannot be deleted. They are skipped on Production and on a stand not
+    recognised as a test stand (see production_safety.state_change_refusal).
     """
     refusal = production_safety.state_change_refusal()
     if refusal:
@@ -442,7 +442,7 @@ def client():
 
 @pytest.fixture(scope="session")
 def cli_analytics_state_changes_allowed():
-    """Skip before a CLI Analytics fixture creates data on a shared/read-only stand."""
+    """Skip before a CLI Analytics fixture creates data on Production or in a read-only run."""
     refusal = production_safety.state_change_refusal()
     if refusal:
         pytest.skip(f"State-changing CLI Analytics fixture refused: {refusal}")

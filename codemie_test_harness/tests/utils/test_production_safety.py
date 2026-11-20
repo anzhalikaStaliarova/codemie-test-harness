@@ -15,6 +15,7 @@
 import pytest
 import requests
 
+from codemie_test_harness.tests.enums.environment import Environment
 from codemie_test_harness.tests.utils import production_safety
 
 
@@ -37,6 +38,47 @@ def _settings(monkeypatch, values: dict[str, str] | None = None) -> None:
         staticmethod(lambda name, default="": (values or {}).get(name, default)),
     )
     monkeypatch.setattr(production_safety, "_read_only_run", False)
+
+
+def _stand(monkeypatch, environment: Environment) -> None:
+    monkeypatch.setattr(
+        production_safety.EnvironmentResolver,
+        "get_environment",
+        classmethod(lambda cls: environment),
+    )
+
+
+def test_production_refuses_state_changes(monkeypatch):
+    _settings(monkeypatch, {production_safety.ALLOW_STATE_CHANGES: "true"})
+    _stand(monkeypatch, Environment.PRODUCTION)
+
+    assert production_safety.state_change_refusal() == "the stand is Production"
+
+
+@pytest.mark.parametrize(
+    "environment", [Environment.PREVIEW, Environment.LOCALHOST, Environment.AWS]
+)
+def test_test_stands_allow_state_changes(monkeypatch, environment):
+    _settings(monkeypatch)
+    _stand(monkeypatch, environment)
+
+    assert production_safety.state_change_refusal() is None
+
+
+def test_unknown_stand_needs_explicit_permission(monkeypatch):
+    _settings(monkeypatch)
+    _stand(monkeypatch, Environment.UNKNOWN)
+    assert "not recognised as a test stand" in production_safety.state_change_refusal()
+
+    _settings(monkeypatch, {production_safety.ALLOW_STATE_CHANGES: "true"})
+    assert production_safety.state_change_refusal() is None
+
+
+def test_read_only_run_refuses_state_changes_on_any_stand(monkeypatch):
+    _settings(monkeypatch, {production_safety.READ_ONLY_RUN: "true"})
+    _stand(monkeypatch, Environment.PREVIEW)
+
+    assert production_safety.state_change_refusal() == "the run is read-only"
 
 
 def test_unrelated_run_does_not_install_transport_guard(monkeypatch):
