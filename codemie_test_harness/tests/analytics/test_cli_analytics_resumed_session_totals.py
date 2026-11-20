@@ -22,13 +22,11 @@ Grounded in src/codemie/repository/cli_analytics/postgres/rollups.py and reader.
 - session_dims.started_at/last_event_at are at least the MIN/MAX of hook events whose
   event_type is one of the 13 DIMENSION_HOOK_TYPES (agent.session.start/end,
   agent.prompt.submit, agent.tool.start/end/error, ...), merged across every batch of the
-  same session_id (ON CONFLICT (session_id) DO UPDATE ... LEAST/GREATEST). This session
-  also sends OTLP tool/interaction spans (below), and this environment's observed
-  last_event_at has matched a span's own timestamp rather than only a hook dimension
-  event's, so this test places the hook agent.session.end event's own timestamp past every
-  span it sends (min_session_end_offset_s on build_hook_events) -- making it unambiguously
-  the session's last dimension event, and duration_ms exactly computable from that offset,
-  regardless of whether span timestamps also feed last_event_at on this environment.
+  same session_id (ON CONFLICT (session_id) DO UPDATE ... LEAST/GREATEST). The reported
+  end is the session's last real work (real_work_sql.py): lifecycle hooks such as
+  agent.session.end are not work, so the end is the start of the last OTLP span this test
+  sends. The test places agent.session.end after every span (min_session_end_offset_s on
+  build_hook_events), so a hook that stretched the session would change duration_ms.
 - tool_call_count / tool_calls_success / tools[] come only from `claude_code.tool` /
   `claude_code.tool.execution` OTLP spans (get_session_detail_tools: a spans-only query,
   success_count = count of TOOL_EXECUTION spans with success='true' joined by tool_use_id).
@@ -86,17 +84,27 @@ _EXPECTED_TOTALS = {
 # into batch2's timeline and run, for 2 calls spaced 2s apart (its own fixed per-call gap),
 # each a 1s claude_code.tool span immediately followed by a 0.5s claude_code.tool.execution
 # span: the last span ends at _TOOL_SPANS_START_OFFSET + (2 - 1) * 2 + 1 + 0.5 = 5.5s into
-# batch2's timeline. _SESSION_END_OFFSET_S forces the hook agent.session.end event's own
-# offset past that (plus margin), so it -- not a span -- is unambiguously batch2's last
-# dimension event: duration_ms is exactly computable from it, batch2 itself starting
-# _RESUME_OFFSET after batch1.
+# batch2's timeline. The session ends at its last real work, the start of the last
+# tool.execution span (5s into batch2, batch2 itself starting _RESUME_OFFSET after batch1);
+# the agent.session.end hook at _SESSION_END_OFFSET_S is a lifecycle event and must not
+# extend it.
 _RESUME_OFFSET = timedelta(seconds=60)
 _TOOL_SPANS_START_OFFSET = timedelta(seconds=2)
+_TOOL_SPAN_GAP = timedelta(seconds=2)  # build_tool_spans: one call every 2s
+_TOOL_SPAN_LENGTH = timedelta(
+    seconds=1
+)  # the execution span starts as the tool span ends
 _SESSION_END_OFFSET_S = 7.0
-_EXPECTED_DURATION_MS = int(
-    (_RESUME_OFFSET + timedelta(seconds=_SESSION_END_OFFSET_S)).total_seconds() * 1000
-)
 _EXPECTED_TOOL_CALL_COUNT = 2
+_EXPECTED_DURATION_MS = int(
+    (
+        _RESUME_OFFSET
+        + _TOOL_SPANS_START_OFFSET
+        + (_EXPECTED_TOOL_CALL_COUNT - 1) * _TOOL_SPAN_GAP
+        + _TOOL_SPAN_LENGTH
+    ).total_seconds()
+    * 1000
+)
 _EXPECTED_TOOL_SUCCESS_COUNT = 1  # Bash succeeds, Write errors
 _EXPECTED_TOOLS = {
     "Bash": (1, 1),
