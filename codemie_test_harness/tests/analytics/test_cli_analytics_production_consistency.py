@@ -670,6 +670,7 @@ def test_session_detail_tool_success_matches_its_aggregate(cli_api, window):
     )
 
 
+@pytest.mark.sanity
 def test_unknown_session_returns_404(cli_api):
     """A trace id that does not exist answers 404 'Session not found', not an empty session."""
     response = cli_api.request(

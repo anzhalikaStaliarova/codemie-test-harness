@@ -40,7 +40,6 @@ def test_cli_analytics_tab_opens_from_analytics_page(page):
     cli_analytics.should_have_loaded_section(CLIAnalyticsPage.DEFAULT_SECTION)
 
 
-@pytest.mark.sanity
 @pytest.mark.ui
 @pytest.mark.prod_regression
 @pytest.mark.cli_analytics
