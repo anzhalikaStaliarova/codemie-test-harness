@@ -259,7 +259,11 @@ def cli_api(client, cli_analytics_enabled) -> CliAnalyticsApi:
 
 @pytest.fixture(scope="module")
 def window() -> dict:
-    """Closed window [today-8d 00:00, today-1d 00:00) UTC; real sessions in it no longer move."""
+    """Closed window [today-8d 00:00, today-1d 00:00) UTC; real sessions in it no longer move.
+
+    The harness's own CLI Analytics tests seed back-dated sessions into it (``seed_day_start``:
+    today-2, with a day on either side), so compared figures are read on a settled window.
+    """
     today = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
@@ -828,10 +832,10 @@ def test_time_period_selects_the_same_sessions_as_its_date_range(cli_api, period
     """time_period selects the sessions of the equivalent start_date/end_date range.
 
     Sessions that started well inside the period (a minute from either edge) must be returned,
-    and nothing that started before the period may be."""
+    and nothing that started before the period may be. The period ends now, so other runs add
+    and remove sessions in it while it is read: the range is read before and after, and a
+    session that appeared or disappeared in between is not compared."""
     before = datetime.now(timezone.utc)
-    returned = _session_ids(cli_api, live=True, time_period=period)
-
     earliest = before - TIME_PERIODS[period]
     if period in DAY_BASED_PERIODS:
         earliest = earliest.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -842,14 +846,22 @@ def test_time_period_selects_the_same_sessions_as_its_date_range(cli_api, period
             cli_api, live=True, start_date=start.isoformat(), end_date=end.isoformat()
         )
 
+    first = ids(earliest - margin, before)
+    returned = _session_ids(cli_api, live=True, time_period=period)
     inner = ids(earliest + margin, before - margin)
     # the API rejects an end_date in the future, so the outer range ends at the last instant read
     outer = ids(earliest - margin, datetime.now(timezone.utc))
+    moved = first ^ outer  # added or removed while the test read the period
+
     assert_that(
-        sorted(inner - returned), equal_to([]), "sessions inside the period missing"
+        sorted(inner - moved - returned),
+        equal_to([]),
+        "sessions inside the period missing",
     )
     assert_that(
-        sorted(returned - outer), equal_to([]), "sessions outside the period returned"
+        sorted(returned - moved - outer),
+        equal_to([]),
+        "sessions outside the period returned",
     )
 
 
