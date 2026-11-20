@@ -906,6 +906,7 @@ def test_invalid_query_is_rejected(cli_api, endpoint, params, status, message):
         assert_that(response.text, contains_string(message))
 
 
+@pytest.mark.sanity
 def test_analytics_responses_are_not_publicly_cacheable(cli_api, window):
     """Per-user analytics are marked private, so no shared cache may serve them to another user."""
     response = cli_api.request("GET", f"{INGEST_PREFIX}/overview", params=window)
@@ -920,6 +921,7 @@ def test_analytics_responses_are_not_publicly_cacheable(cli_api, window):
     )
 
 
+@pytest.mark.sanity
 @pytest.mark.parametrize("endpoint", ["overview", "sessions", "users"])
 def test_unauthenticated_request_gets_no_analytics(cli_analytics_enabled, endpoint):
     """Without a token the API answers 401/403 or redirects to sign-in; no analytics JSON leaks."""
