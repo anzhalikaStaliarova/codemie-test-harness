@@ -28,6 +28,7 @@ _consistent_read).
 """
 
 import math
+import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Callable, TypeVar
@@ -58,6 +59,10 @@ T = TypeVar("T")
 
 MAX_PER_PAGE = 1000
 CONSISTENT_READ_ATTEMPTS = 3
+# The backend caches /users, /user-charts and /cost answers for 30 s per pod
+# (CLI_ANALYTICS_DASHBOARD_CACHE_TTL_S) while /overview is live: once the Overview has not
+# changed for longer than that, every cached answer was built from the current data.
+SETTLE_S = 40
 TOOL_USAGE_LIMIT = 20
 DETAIL_SAMPLE = 10
 MONEY = {"rel": 1e-6, "abs": 0.01}
@@ -153,19 +158,47 @@ def _session_ids(cli_api, live: bool = False, **params) -> set[str]:
     return {s["trace_id"] for s in _read_all_sessions(cli_api, live, **params)}
 
 
+_settled = {"state": None, "since": 0.0}
+
+
+def _settled_state(cli_api, window: dict) -> dict:
+    """The window's live Overview KPIs once they have not changed for SETTLE_S seconds.
+
+    The state and the time it was first seen are kept across tests, so a quiet window waits
+    once per module; a window that keeps changing fails after a few settle periods.
+    """
+    deadline = time.monotonic() + CONSISTENT_READ_ATTEMPTS * SETTLE_S
+    while True:
+        state = cli_api.get_data("overview", **window)["kpis"]
+        now = time.monotonic()
+        if state != _settled["state"]:
+            _settled.update(state=state, since=now)
+        remaining = SETTLE_S - (now - _settled["since"])
+        if remaining <= 0:
+            return state
+        if now + remaining > deadline:
+            pytest.fail(
+                f"The window {window} did not stay unchanged for {SETTLE_S}s: other runs "
+                "keep changing it, so its cached and live figures cannot be compared"
+            )
+        time.sleep(remaining)
+
+
 def _consistent_read(cli_api, window: dict, read: Callable[[], T]) -> T:
-    """``read()`` taken between two identical Overview reads of the window.
+    """``read()`` taken on a settled window, between two identical Overview reads of it.
 
     Other runs on a shared stand ingest back-dated sessions into past windows and delete their
     projects, which removes sessions again. Figures read on both sides of such a change describe
-    different data, so the read is taken again, at most CONSISTENT_READ_ATTEMPTS times, until
-    the window has not changed around it. Pages that disagree with their total count as a change
-    only when the window did change; otherwise they fail the test. Assertions run once, on that
-    one state of the stand; a window that changes during every read fails the test.
+    different data, and a cached answer can still describe the data before it (SETTLE_S). So
+    the read starts once the window has settled and is taken again, at most
+    CONSISTENT_READ_ATTEMPTS times, until the window has not changed around it. Pages that
+    disagree with their total count as a change only when the window did change; otherwise they
+    fail the test. Assertions run once, on that one state of the stand; a window that changes
+    during every read fails the test.
     """
     changes = []
     for _ in range(CONSISTENT_READ_ATTEMPTS):
-        before = cli_api.get_data("overview", **window)["kpis"]
+        before = _settled_state(cli_api, window)
         try:
             result, disagreement = read(), None
         except PagesDisagree as error:
