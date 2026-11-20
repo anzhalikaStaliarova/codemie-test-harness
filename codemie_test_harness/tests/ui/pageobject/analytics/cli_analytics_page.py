@@ -249,7 +249,23 @@ class CLIAnalyticsPage(BasePage):
         if prefix.rstrip("/"):
             return False
         query = parse_qs(url.query)
+        if self._is_side_request(endpoint, query, params or {}):
+            return False
         return all(query.get(k) == [str(v)] for k, v in (params or {}).items())
+
+    @staticmethod
+    def _is_side_request(endpoint: str, query: dict, params: dict) -> bool:
+        """A request a section fires beside the data its widgets render, unless asked for.
+
+        The Overview's API Spend card reads the overview of one subscription type, and its
+        Total Users card reads one users row; both can answer before the section's own
+        request with the same filters.
+        """
+        if endpoint == "overview" and "subscription_type" in query:
+            return "subscription_type" not in params
+        if endpoint == "users" and query.get("per_page") == ["1"]:
+            return "per_page" not in params
+        return False
 
     def expect_section_data(
         self,
@@ -291,6 +307,13 @@ class CLIAnalyticsPage(BasePage):
             )
             waiters.append((endpoint, waiter))
         return stack
+
+    def expect_user_count(self):
+        """Wait for the Total Users request of the Overview (one users row, its total_count)."""
+        return self.page.expect_response(
+            lambda r: self._is_api_response(r, "users", {"per_page": 1}),
+            timeout=self.SECTION_RESPONSE_TIMEOUT_MS,
+        )
 
     def _expect_sessions(self, **params):
         """Wait for the Sessions table request carrying all ``params``."""
