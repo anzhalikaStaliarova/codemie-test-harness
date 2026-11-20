@@ -460,8 +460,11 @@ def test_repository_rows_are_internally_consistent(snapshot, all_sessions):
 
 
 def test_repository_pages_partition_the_full_list(cli_api, window, snapshot):
-    """Paged repositories: correct total_count/has_more and pages that concatenate to the full list."""
-    per_page = max(1, min(5, len(snapshot["repositories_by_name"]["rows"]) // 2 or 1))
+    """Paged repositories: correct total_count/has_more and pages that concatenate to the full list.
+
+    About four pages, the last one partial, whatever the number of repositories: a fixed small
+    page would take hundreds of requests on a busy stand."""
+    per_page = len(snapshot["repositories_by_name"]["rows"]) // 4 + 1
 
     def read():
         full = _read_all_rows(cli_api, "repositories", **window)["rows"]
