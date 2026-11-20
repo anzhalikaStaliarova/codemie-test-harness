@@ -380,7 +380,6 @@ def sessions_section(overview) -> tuple[CLIAnalyticsPage, dict]:
     return cli_analytics, responses
 
 
-@pytest.mark.sanity
 def test_overview_kpi_cards_render_overview_api_figures(overview):
     """Every Overview card shows its overview API figure, formatted, with its caption."""
     cli_analytics, responses = overview
@@ -389,7 +388,6 @@ def test_overview_kpi_cards_render_overview_api_figures(overview):
     _assert_kpis(cli_analytics, expected)
 
 
-@pytest.mark.sanity
 def test_time_period_filter_reloads_overview_for_selected_period(overview):
     """Picking 'Last 7 Days' sends time_period=last_7_days, keeps it in the URL and re-renders the KPIs."""
     cli_analytics, _ = overview

@@ -75,7 +75,6 @@ def test_cli_analytics_session_opens_from_sessions_table(page, cli_analytics_ses
     session_modal.should_be_closed()
 
 
-@pytest.mark.sanity
 @pytest.mark.ui
 @pytest.mark.cli_analytics
 def test_cli_analytics_session_search_uses_repository_not_run_id(
