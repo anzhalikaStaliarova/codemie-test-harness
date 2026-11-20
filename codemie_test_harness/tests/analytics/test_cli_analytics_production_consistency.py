@@ -37,6 +37,7 @@ import pytest
 import requests
 from hamcrest import (
     assert_that,
+    close_to,
     contains_string,
     equal_to,
     greater_than,
@@ -105,7 +106,10 @@ def _ts(value: str) -> datetime:
 
 
 def _approx(value: float):
-    return pytest.approx(value, **MONEY)
+    """A money matcher with the tolerance of MONEY: relative to the value, never below a cent."""
+    if not isinstance(value, (int, float)):
+        return equal_to(value)
+    return close_to(value, max(MONEY["rel"] * abs(value), MONEY["abs"]))
 
 
 class PagesDisagree(AssertionError):
@@ -332,11 +336,11 @@ def test_total_cost_reconciles_across_endpoints_and_breakdowns(snapshot, all_ses
     total = _kpis(snapshot)["total_cost_usd"]
     cost = snapshot["cost"]
 
-    assert cost["kpis"]["total_cost_usd"] == _approx(total)
-    assert snapshot["efficiency"]["kpis"]["total_cost_usd"] == _approx(total)
-    assert sum(r["cost_usd"] for r in cost["cost_by_model"]) == _approx(total)
-    assert sum(r["cost_usd"] for r in cost["cost_by_user"]) == _approx(total)
-    assert sum(s["cost_usd"] or 0 for s in all_sessions) == _approx(total)
+    assert_that(cost["kpis"]["total_cost_usd"], _approx(total))
+    assert_that(snapshot["efficiency"]["kpis"]["total_cost_usd"], _approx(total))
+    assert_that(sum(r["cost_usd"] for r in cost["cost_by_model"]), _approx(total))
+    assert_that(sum(r["cost_usd"] for r in cost["cost_by_user"]), _approx(total))
+    assert_that(sum(s["cost_usd"] or 0 for s in all_sessions), _approx(total))
     spend_sessions = _spend_sessions(snapshot)
     assert_that(spend_sessions, greater_than(0), "sessions with a cost row")
     assert_that(
@@ -376,7 +380,7 @@ def test_user_rows_add_up_to_overview_and_pages_match_charts(snapshot):
         ("tool_calls", "total_tool_calls"),
     ):
         assert_that(sum(r[field] for r in chart_rows), equal_to(kpis[kpi]), field)
-    assert sum(r["cost_usd"] for r in chart_rows) == _approx(kpis["total_cost_usd"])
+    assert_that(sum(r["cost_usd"] for r in chart_rows), _approx(kpis["total_cost_usd"]))
 
     costs = [r["cost_usd"] for r in chart_rows]
     assert_that(costs, equal_to(sorted(costs, reverse=True)), "rows by cost DESC")
@@ -430,15 +434,19 @@ def test_efficiency_figures_match_overview(snapshot):
     assert_that(dead["count"], less_than_or_equal_to(spend_sessions))
     assert_that(dead["pct_of_sessions"], equal_to(_pct(dead["count"], spend_sessions)))
     if dead["count"]:
-        assert dead["avg_cost_per_dead"] == _approx(
-            dead["wasted_cost_usd"] / dead["count"]
+        assert_that(
+            dead["avg_cost_per_dead"], _approx(dead["wasted_cost_usd"] / dead["count"])
         )
     assert_that(
         dead["wasted_cost_usd"], less_than_or_equal_to(kpis["total_cost_usd"] + 0.01)
     )
     assert_that(eff["kpis"]["bloat_pct"], equal_to(kpis["bloat_pct"]))
-    assert eff["kpis"]["avg_context_per_call"] == _approx(kpis["avg_context_per_call"])
-    assert eff["kpis"]["cache_read_cost_usd"] == _approx(kpis["cache_read_cost_usd"])
+    assert_that(
+        eff["kpis"]["avg_context_per_call"], _approx(kpis["avg_context_per_call"])
+    )
+    assert_that(
+        eff["kpis"]["cache_read_cost_usd"], _approx(kpis["cache_read_cost_usd"])
+    )
     assert_that(eff["code_changes"]["net_lines"], equal_to(kpis["net_lines"]))
     assert_that(
         eff["code_changes"]["files_changed"], equal_to(kpis["total_files_changed"])
@@ -572,7 +580,7 @@ def test_sessions_are_sorted_and_inside_the_window(cli_api, window, sort_by):
         )
     end = _ts(window["end_date"])
     for s in sessions:
-        assert _ts(s["start_time"]) <= end, s["trace_id"]
+        assert_that(_ts(s["start_time"]), less_than_or_equal_to(end), s["trace_id"])
 
 
 def test_session_pages_are_disjoint_and_contiguous(cli_api, window, snapshot):
@@ -612,7 +620,7 @@ def test_session_detail_matches_its_list_row(cli_api, window):
         assert_that(
             actual, equal_to({k: row[k] for k in DETAIL_FIELDS}), row["trace_id"]
         )
-        assert detail["cost_usd"] == _approx(row["cost_usd"]), row["trace_id"]
+        assert_that(detail["cost_usd"], _approx(row["cost_usd"]), row["trace_id"])
         assert_that(
             detail["tool_calls_success"],
             equal_to(sum(t["success_count"] for t in detail["tools"])),
@@ -708,7 +716,7 @@ def test_user_filter_returns_exactly_that_users_row(cli_api, window, snapshot):
         (kpis["total_sessions"], kpis["total_turns"], kpis["total_tool_calls"]),
         equal_to((user["session_count"], user["turns"], user["tool_calls"])),
     )
-    assert kpis["total_cost_usd"] == _approx(user["cost_usd"])
+    assert_that(kpis["total_cost_usd"], _approx(user["cost_usd"]))
     assert_that(kpis["tool_call_success_rate"], equal_to(user["tool_success_rate"]))
     assert_that(len(sessions), equal_to(user["session_count"]))
     assert_that({s["user_email"] for s in sessions}, equal_to({user["user_email"]}))
@@ -740,7 +748,7 @@ def test_repository_filter_returns_exactly_that_repository_row(
         (kpis["total_sessions"], kpis["total_turns"], kpis["total_tool_calls"]),
         equal_to((repo["session_count"], repo["turns"], repo["tool_calls"])),
     )
-    assert kpis["total_cost_usd"] == _approx(repo["cost_usd"])
+    assert_that(kpis["total_cost_usd"], _approx(repo["cost_usd"]))
     assert_that(kpis["net_lines"], equal_to(repo["net_lines"]))
     assert_that(kpis["tool_call_success_rate"], equal_to(repo["tool_success_rate"]))
     assert_that({s["repository"] for s in sessions}, equal_to({repo["repository"]}))

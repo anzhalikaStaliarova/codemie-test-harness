@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from hamcrest import assert_that, equal_to, is_
+
 from codemie_test_harness.tests.ui.analytics.test_cli_analytics_api_consistency import (
     _currency,
     _duration,
@@ -50,39 +52,41 @@ def _api_domain(monkeypatch, value: str = "https://codemie.test/code-assistant-a
 
 
 def test_currency_keeps_two_significant_digits_below_a_cent():
-    assert _currency(0.003465) == "$0.0035"
-    assert _currency(0.000012) == "$0.000012"
-    assert _currency(0.005) == "$0.005"
-    assert _currency(0.0099) == "$0.0099"
-    assert _currency(0.01) == "$0.01"
+    assert_that(_currency(0.003465), equal_to("$0.0035"))
+    assert_that(_currency(0.000012), equal_to("$0.000012"))
+    assert_that(_currency(0.005), equal_to("$0.005"))
+    assert_that(_currency(0.0099), equal_to("$0.0099"))
+    assert_that(_currency(0.01), equal_to("$0.01"))
 
 
 def test_currency_formats_two_decimals_with_the_sign_after_the_dollar():
-    assert _currency(0) == "$0.00"
-    assert _currency(1234.5) == "$1,234.50"
-    assert _currency(-0.0) == "$-0.00"
-    assert _currency(-0.001) == "$-0.00"
-    assert _currency(-0.5) == "$-0.50"
-    assert _currency(-101) == "$-101.00"
+    assert_that(_currency(0), equal_to("$0.00"))
+    assert_that(_currency(1234.5), equal_to("$1,234.50"))
+    assert_that(_currency(-0.0), equal_to("$-0.00"))
+    assert_that(_currency(-0.001), equal_to("$-0.00"))
+    assert_that(_currency(-0.5), equal_to("$-0.50"))
+    assert_that(_currency(-101), equal_to("$-101.00"))
 
 
 def test_session_cost_marks_unknown_and_keeps_partial_amounts():
     priced = {"cost_available": True, "cost_incomplete": False, "unpriced_models": []}
-    assert _session_cost(0.0623, priced) == "$0.06"
-    assert _session_cost(None, priced) == "-"
-    assert _session_cost(1.5, {**priced, "cost_available": False}) == "-"
-    assert _session_cost(1.5, {**priced, "unpriced_models": ["m"]}) == "$1.50"
-    assert _session_cost(None, {**priced, "cost_incomplete": True}) == "-"
+    assert_that(_session_cost(0.0623, priced), equal_to("$0.06"))
+    assert_that(_session_cost(None, priced), equal_to("-"))
+    assert_that(_session_cost(1.5, {**priced, "cost_available": False}), equal_to("-"))
+    assert_that(
+        _session_cost(1.5, {**priced, "unpriced_models": ["m"]}), equal_to("$1.50")
+    )
+    assert_that(_session_cost(None, {**priced, "cost_incomplete": True}), equal_to("-"))
 
 
 def test_duration_uses_three_units_from_the_largest_one():
-    assert _duration(None) == "—"
-    assert _duration(0) == "—"
-    assert _duration(999) == "999ms"
-    assert _duration(42_079) == "42s"
-    assert _duration(90_000) == "1min 30s"
-    assert _duration(3_603_000) == "1h 3s"
-    assert _duration((2 * 30 + 8) * 86_400_000) == "2m 1w 1d"
+    assert_that(_duration(None), equal_to("—"))
+    assert_that(_duration(0), equal_to("—"))
+    assert_that(_duration(999), equal_to("999ms"))
+    assert_that(_duration(42_079), equal_to("42s"))
+    assert_that(_duration(90_000), equal_to("1min 30s"))
+    assert_that(_duration(3_603_000), equal_to("1h 3s"))
+    assert_that(_duration((2 * 30 + 8) * 86_400_000), equal_to("2m 1w 1d"))
 
 
 def _summary(**fields) -> dict:
@@ -96,23 +100,46 @@ def _summary(**fields) -> dict:
 
 
 def test_session_tool_calls_report_the_summary_total_and_observed_outcomes():
-    assert _session_tool_calls(_summary(tool_call_count=6, tool_calls_total=6)) == (
-        "6",
-        "100% ok",
+    assert_that(
+        _session_tool_calls(_summary(tool_call_count=6, tool_calls_total=6)),
+        equal_to(
+            (
+                "6",
+                "100% ok",
+            )
+        ),
     )
-    assert _session_tool_calls(
-        _summary(tool_call_count=5, tool_calls_total=None, tool_success_rate=80.0)
-    ) == ("5", "Observed only · 80% ok")
-    assert _session_tool_calls(
-        _summary(tool_call_count=6, tool_calls_total=10, summary_state="provisional")
-    ) == ("10", "Provisional · 6 observed of 10 total · 100% ok")
-    assert _session_tool_calls(_summary(tool_call_count=0, tool_calls_total=None)) == (
-        "—",
-        "Not reported",
+    assert_that(
+        _session_tool_calls(
+            _summary(tool_call_count=5, tool_calls_total=None, tool_success_rate=80.0)
+        ),
+        equal_to(("5", "Observed only · 80% ok")),
     )
-    assert _session_tool_calls(_summary(tool_call_count=0, tool_calls_total=4)) == (
-        "4",
-        "No outcomes observed",
+    assert_that(
+        _session_tool_calls(
+            _summary(
+                tool_call_count=6, tool_calls_total=10, summary_state="provisional"
+            )
+        ),
+        equal_to(("10", "Provisional · 6 observed of 10 total · 100% ok")),
+    )
+    assert_that(
+        _session_tool_calls(_summary(tool_call_count=0, tool_calls_total=None)),
+        equal_to(
+            (
+                "—",
+                "Not reported",
+            )
+        ),
+    )
+    assert_that(
+        _session_tool_calls(_summary(tool_call_count=0, tool_calls_total=4)),
+        equal_to(
+            (
+                "4",
+                "No outcomes observed",
+            )
+        ),
     )
 
 
@@ -120,10 +147,15 @@ def test_overview_api_spend_request_is_not_the_overview_data(monkeypatch):
     _api_domain(monkeypatch)
     response = FakeResponse(f"{API}overview?subscription_type=codemie&time_period=x")
 
-    assert not _page()._is_api_response(response, "overview", None)
-    assert not _page()._is_api_response(response, "overview", {"time_period": "x"})
-    assert _page()._is_api_response(
-        response, "overview", {"subscription_type": "codemie"}
+    assert_that(_page()._is_api_response(response, "overview", None), is_(False))
+    assert_that(
+        _page()._is_api_response(response, "overview", {"time_period": "x"}), is_(False)
+    )
+    assert_that(
+        _page()._is_api_response(
+            response, "overview", {"subscription_type": "codemie"}
+        ),
+        is_(True),
     )
 
 
@@ -132,9 +164,9 @@ def test_user_count_request_is_not_the_users_table(monkeypatch):
     count = FakeResponse(f"{API}users?page=0&per_page=1")
     table = FakeResponse(f"{API}users?page=0&per_page=10")
 
-    assert not _page()._is_api_response(count, "users", None)
-    assert _page()._is_api_response(count, "users", {"per_page": 1})
-    assert _page()._is_api_response(table, "users", None)
+    assert_that(_page()._is_api_response(count, "users", None), is_(False))
+    assert_that(_page()._is_api_response(count, "users", {"per_page": 1}), is_(True))
+    assert_that(_page()._is_api_response(table, "users", None), is_(True))
 
 
 def test_framework_sessions_request_matches_without_default_page(monkeypatch):
@@ -144,7 +176,10 @@ def test_framework_sessions_request_matches_without_default_page(monkeypatch):
         "sessions?framework=claude_code"
     )
 
-    assert _page()._is_api_response(response, "sessions", {"framework": "claude_code"})
+    assert_that(
+        _page()._is_api_response(response, "sessions", {"framework": "claude_code"}),
+        is_(True),
+    )
 
 
 def test_framework_sessions_request_rejects_unrelated_endpoint(monkeypatch):
@@ -154,8 +189,9 @@ def test_framework_sessions_request_rejects_unrelated_endpoint(monkeypatch):
         "users?framework=claude_code"
     )
 
-    assert not _page()._is_api_response(
-        response, "sessions", {"framework": "claude_code"}
+    assert_that(
+        _page()._is_api_response(response, "sessions", {"framework": "claude_code"}),
+        is_(False),
     )
 
 
@@ -166,7 +202,10 @@ def test_framework_sessions_request_accepts_optional_single_path_prefix(monkeypa
         "sessions?framework=claude_code"
     )
 
-    assert _page()._is_api_response(response, "sessions", {"framework": "claude_code"})
+    assert_that(
+        _page()._is_api_response(response, "sessions", {"framework": "claude_code"}),
+        is_(True),
+    )
 
 
 def test_framework_sessions_request_rejects_unrelated_prefix(monkeypatch):
@@ -176,8 +215,9 @@ def test_framework_sessions_request_rejects_unrelated_prefix(monkeypatch):
         "sessions?framework=claude_code"
     )
 
-    assert not _page()._is_api_response(
-        response, "sessions", {"framework": "claude_code"}
+    assert_that(
+        _page()._is_api_response(response, "sessions", {"framework": "claude_code"}),
+        is_(False),
     )
 
 
@@ -188,8 +228,9 @@ def test_framework_sessions_request_rejects_path_with_endpoint_suffix_only(monke
         "sessions?framework=claude_code"
     )
 
-    assert not _page()._is_api_response(
-        response, "sessions", {"framework": "claude_code"}
+    assert_that(
+        _page()._is_api_response(response, "sessions", {"framework": "claude_code"}),
+        is_(False),
     )
 
 
@@ -201,8 +242,9 @@ def test_framework_sessions_request_rejects_wrong_method(monkeypatch):
         method="POST",
     )
 
-    assert not _page()._is_api_response(
-        response, "sessions", {"framework": "claude_code"}
+    assert_that(
+        _page()._is_api_response(response, "sessions", {"framework": "claude_code"}),
+        is_(False),
     )
 
 
@@ -213,6 +255,7 @@ def test_framework_sessions_request_rejects_wrong_framework(monkeypatch):
         "sessions?framework=codex"
     )
 
-    assert not _page()._is_api_response(
-        response, "sessions", {"framework": "claude_code"}
+    assert_that(
+        _page()._is_api_response(response, "sessions", {"framework": "claude_code"}),
+        is_(False),
     )

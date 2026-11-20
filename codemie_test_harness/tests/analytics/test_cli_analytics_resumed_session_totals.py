@@ -43,7 +43,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from hamcrest import assert_that, equal_to
+from hamcrest import assert_that, contains_string, equal_to, is_not
 
 from codemie_test_harness.otlp_builder import (
     build_hook_events,
@@ -175,7 +175,7 @@ def test_resumed_session_reports_combined_totals_and_a_distinct_session_stays_se
 
     session_id = f"autotest-cli-resumed-{uuid.uuid4().hex[:12]}"
     repository = f"autotest/resumed-{uuid.uuid4().hex[:12]}"
-    assert session_id not in repository
+    assert_that(repository, is_not(contains_string(session_id)))
     tool_calls = [
         {
             "tool_name": "Bash",

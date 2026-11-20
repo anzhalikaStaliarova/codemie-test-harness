@@ -32,7 +32,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from hamcrest import assert_that, equal_to, greater_than, has_length
+from hamcrest import assert_that, equal_to, greater_than, has_length, is_
 
 from codemie_test_harness.tests.ui.pageobject.analytics.cli_analytics_page import (
     CLIAnalyticsPage,
@@ -363,7 +363,11 @@ def overview(page) -> tuple[CLIAnalyticsPage, dict]:
     with cli_analytics.expect_user_count() as user_count:
         cli_analytics.navigate_to(responses)
     cli_analytics.should_have_loaded_section(CLIAnalyticsSection.OVERVIEW)
-    assert user_count.value.ok, f"user count failed with HTTP {user_count.value.status}"
+    assert_that(
+        user_count.value.ok,
+        is_(True),
+        f"user count failed with HTTP {user_count.value.status}",
+    )
     responses["user_count"] = user_count.value.json()["data"]["total_count"]
     return cli_analytics, responses
 

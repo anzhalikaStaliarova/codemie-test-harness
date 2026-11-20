@@ -31,6 +31,7 @@ from contextlib import ExitStack
 from typing import Callable, NamedTuple, TypeVar
 from urllib.parse import parse_qs, urlparse
 
+from hamcrest import assert_that, equal_to, is_
 from playwright.sync_api import Locator, expect
 from reportportal_client import step
 
@@ -323,7 +324,11 @@ class CLIAnalyticsPage(BasePage):
 
     @staticmethod
     def _data_of(response, action: str) -> dict:
-        assert response.ok, f"{action} request failed with HTTP {response.status}"
+        assert_that(
+            response.ok,
+            is_(True),
+            f"{action} request failed with HTTP {response.status}",
+        )
         return response.json()["data"]
 
     def read_table(self, rows: Locator) -> list[dict[str, str]]:
@@ -430,9 +435,11 @@ class CLIAnalyticsPage(BasePage):
         data = self._data_of(response, "Session detail")
         if expected_session_id is not None:
             actual_session_id = urlparse(response.url).path.rsplit("/", 1)[-1]
-            assert actual_session_id == expected_session_id, (
+            assert_that(
+                actual_session_id,
+                equal_to(expected_session_id),
                 f"Clicked session should request detail for {expected_session_id!r}, "
-                f"got {actual_session_id!r}"
+                f"got {actual_session_id!r}",
             )
         return CLIAnalyticsSessionModal(self.page).should_be_visible(), data
 

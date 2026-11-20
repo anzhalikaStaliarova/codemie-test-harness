@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import pytest
+from hamcrest import assert_that, contains_string, equal_to, none, same_instance
 import requests
 
 from codemie_test_harness.tests.enums.environment import Environment
@@ -52,7 +53,9 @@ def test_production_refuses_state_changes(monkeypatch):
     _settings(monkeypatch, {production_safety.ALLOW_STATE_CHANGES: "true"})
     _stand(monkeypatch, Environment.PRODUCTION)
 
-    assert production_safety.state_change_refusal() == "the stand is Production"
+    assert_that(
+        production_safety.state_change_refusal(), equal_to("the stand is Production")
+    )
 
 
 @pytest.mark.parametrize(
@@ -62,23 +65,28 @@ def test_test_stands_allow_state_changes(monkeypatch, environment):
     _settings(monkeypatch)
     _stand(monkeypatch, environment)
 
-    assert production_safety.state_change_refusal() is None
+    assert_that(production_safety.state_change_refusal(), none())
 
 
 def test_unknown_stand_needs_explicit_permission(monkeypatch):
     _settings(monkeypatch)
     _stand(monkeypatch, Environment.UNKNOWN)
-    assert "not recognised as a test stand" in production_safety.state_change_refusal()
+    assert_that(
+        production_safety.state_change_refusal(),
+        contains_string("not recognised as a test stand"),
+    )
 
     _settings(monkeypatch, {production_safety.ALLOW_STATE_CHANGES: "true"})
-    assert production_safety.state_change_refusal() is None
+    assert_that(production_safety.state_change_refusal(), none())
 
 
 def test_read_only_run_refuses_state_changes_on_any_stand(monkeypatch):
     _settings(monkeypatch, {production_safety.READ_ONLY_RUN: "true"})
     _stand(monkeypatch, Environment.PREVIEW)
 
-    assert production_safety.state_change_refusal() == "the run is read-only"
+    assert_that(
+        production_safety.state_change_refusal(), equal_to("the run is read-only")
+    )
 
 
 def test_unrelated_run_does_not_install_transport_guard(monkeypatch):
@@ -86,8 +94,8 @@ def test_unrelated_run_does_not_install_transport_guard(monkeypatch):
 
     items = [FakeItem("ui")]
 
-    assert production_safety.transport_guard_required(items) is False
-    assert production_safety.configure_run(items) is False
+    assert_that(production_safety.transport_guard_required(items), same_instance(False))
+    assert_that(production_safety.configure_run(items), same_instance(False))
 
 
 def test_read_only_env_requires_transport_guard_without_cli_analytics(monkeypatch):
@@ -95,15 +103,15 @@ def test_read_only_env_requires_transport_guard_without_cli_analytics(monkeypatc
 
     items = [FakeItem("ui")]
 
-    assert production_safety.transport_guard_required(items) is True
-    assert production_safety.configure_run(items) is True
+    assert_that(production_safety.transport_guard_required(items), same_instance(True))
+    assert_that(production_safety.configure_run(items), same_instance(True))
 
 
 def test_empty_selection_is_not_vacuously_read_only(monkeypatch):
     _settings(monkeypatch)
 
-    assert production_safety.transport_guard_required([]) is False
-    assert production_safety.configure_run([]) is False
+    assert_that(production_safety.transport_guard_required([]), same_instance(False))
+    assert_that(production_safety.configure_run([]), same_instance(False))
 
 
 def test_skipped_only_selection_is_not_vacuously_read_only(monkeypatch):
@@ -111,8 +119,8 @@ def test_skipped_only_selection_is_not_vacuously_read_only(monkeypatch):
 
     items = [FakeItem("cli_analytics", "prod_regression", "skip")]
 
-    assert production_safety.transport_guard_required(items) is True
-    assert production_safety.configure_run(items) is False
+    assert_that(production_safety.transport_guard_required(items), same_instance(True))
+    assert_that(production_safety.configure_run(items), same_instance(False))
 
 
 def test_all_runnable_read_only_cli_analytics_tests_require_guard(monkeypatch):
@@ -120,8 +128,8 @@ def test_all_runnable_read_only_cli_analytics_tests_require_guard(monkeypatch):
 
     items = [FakeItem("cli_analytics", "prod_regression")]
 
-    assert production_safety.transport_guard_required(items) is True
-    assert production_safety.configure_run(items) is True
+    assert_that(production_safety.transport_guard_required(items), same_instance(True))
+    assert_that(production_safety.configure_run(items), same_instance(True))
 
 
 def test_read_only_run_rejects_state_changing_http_request(monkeypatch):

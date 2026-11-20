@@ -15,6 +15,7 @@
 """UI coverage for the Analytics > CLI Analytics dashboard (tab opening is smoke)."""
 
 import pytest
+from hamcrest import assert_that, contains_string, equal_to, is_not
 
 from codemie_test_harness.tests.ui.pageobject.analytics.analytics_page import (
     AnalyticsPage,
@@ -81,16 +82,24 @@ def test_cli_analytics_session_search_uses_repository_not_run_id(
 ):
     # @case execute-repeatable-isolated-integration_TC_003
     """Sessions search excludes Run ID and returns the exact session for its repository."""
-    assert cli_analytics_session.session_id not in cli_analytics_session.repository
-    assert cli_analytics_session.session_id not in cli_analytics_session.prompt
+    assert_that(
+        cli_analytics_session.repository,
+        is_not(contains_string(cli_analytics_session.session_id)),
+    )
+    assert_that(
+        cli_analytics_session.prompt,
+        is_not(contains_string(cli_analytics_session.session_id)),
+    )
 
     cli_analytics = CLIAnalyticsPage(page).navigate_to()
     cli_analytics.open_section(CLIAnalyticsSection.SESSIONS)
     cli_analytics.should_have_loaded_section(CLIAnalyticsSection.SESSIONS)
 
     run_id_result = cli_analytics.search_sessions(cli_analytics_session.session_id)
-    assert run_id_result["data"]["sessions"] == [], (
-        "Sessions search must not treat trace_id/session_id as searchable metadata"
+    assert_that(
+        run_id_result["data"]["sessions"],
+        equal_to([]),
+        "Sessions search must not treat trace_id/session_id as searchable metadata",
     )
     cli_analytics.should_list_no_sessions()
 
@@ -98,8 +107,10 @@ def test_cli_analytics_session_search_uses_repository_not_run_id(
     returned_session_ids = [
         session["trace_id"] for session in repository_result["data"]["sessions"]
     ]
-    assert returned_session_ids == [cli_analytics_session.session_id], (
-        "Repository search should return only the seeded session's actual trace_id"
+    assert_that(
+        returned_session_ids,
+        equal_to([cli_analytics_session.session_id]),
+        "Repository search should return only the seeded session's actual trace_id",
     )
     cli_analytics.should_list_exactly_one_session(cli_analytics_session.repository)
 
