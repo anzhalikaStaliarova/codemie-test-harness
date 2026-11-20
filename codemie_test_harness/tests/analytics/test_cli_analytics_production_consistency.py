@@ -21,12 +21,16 @@ reported by every endpoint, breakdowns that add up to their totals, filters that
 the rows of their aggregate, and a session detail that agrees with its list row.
 
 All endpoints are read once per module for one closed window ([today-8d, today-1d] UTC) so
-sessions still being ingested do not shift the totals between two requests.
+sessions still being ingested do not shift the totals between two requests. A shared stand
+still changes past windows (other runs ingest back-dated sessions and delete their projects),
+so figures that are compared with each other are read while the window does not change (see
+_consistent_read).
 """
 
 import math
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from typing import Callable, TypeVar
 
 import pytest
 import requests
@@ -36,6 +40,7 @@ from hamcrest import (
     equal_to,
     greater_than,
     is_in,
+    less_than,
     less_than_or_equal_to,
     not_,
 )
@@ -49,15 +54,13 @@ from codemie_test_harness.tests.utils.cli_analytics_api_utils import (
 
 pytestmark = [pytest.mark.cli_analytics, pytest.mark.api, pytest.mark.prod_regression]
 
+T = TypeVar("T")
+
 MAX_PER_PAGE = 1000
+CONSISTENT_READ_ATTEMPTS = 3
 TOOL_USAGE_LIMIT = 20
 DETAIL_SAMPLE = 10
 MONEY = {"rel": 1e-6, "abs": 0.01}
-TOOL_SUCCESS_DEFECT = (
-    "known defect: session detail counts tool calls from tool_facts_daily but successes "
-    "from at most 20 TOOL/EXEC spans, so it reports a lower success rate than every "
-    "aggregate of the same session"
-)
 # Fields the session list row and the detail compute from the same facts. api_call_count and
 # ctx_per_call are list-only (the detail model leaves them at 0) and user_email holds the
 # developer name in the detail, so they are not compared.
@@ -100,18 +103,110 @@ def _approx(value: float):
     return pytest.approx(value, **MONEY)
 
 
+class PagesDisagree(AssertionError):
+    """The pages of one query do not add up to the total it reports."""
+
+
 def _read_all_rows(cli_api, endpoint: str, **params) -> dict:
     """Every row of a paged endpoint, read page by page, with the total it reports."""
-    rows, page = [], 0
+    rows, totals, page = [], set(), 0
     while True:
         data = cli_api.get_data(endpoint, page=page, per_page=MAX_PER_PAGE, **params)
         total = data.get("pagination", data)["total_count"]
+        totals.add(total)
         rows.extend(data["rows"])
         if len(rows) >= total or not data["rows"]:
             break
         page += 1
-    assert_that(len(rows), equal_to(total), f"{endpoint} rows read page by page")
+    if totals != {len(rows)}:
+        raise PagesDisagree(f"{endpoint} {params}: {len(rows)} rows, totals {totals}")
     return {"rows": rows, "total_count": total}
+
+
+def _read_all_sessions(cli_api, live: bool = False, **params) -> list[dict]:
+    """Every session of a query, read page by page.
+
+    The pages of a closed window must add up to its total without a repeat. A ``live`` query
+    (a period that ends now) gains sessions while it is read, which shifts later pages: a
+    session seen twice is kept once and the total is not compared.
+    """
+    sessions, totals, page = [], set(), 0
+    while True:
+        data = cli_api.get_data("sessions", page=page, per_page=MAX_PER_PAGE, **params)
+        totals.add(data["total"])
+        sessions.extend(data["sessions"])
+        if len(sessions) >= data["total"] or not data["sessions"]:
+            break
+        page += 1
+    unique = list({s["trace_id"]: s for s in sessions}.values())
+    if live:
+        return unique
+    if totals != {len(sessions)} or len(unique) != len(sessions):
+        raise PagesDisagree(
+            f"sessions {params}: {len(sessions)} rows ({len(unique)} distinct), "
+            f"totals {totals}"
+        )
+    return sessions
+
+
+def _session_ids(cli_api, live: bool = False, **params) -> set[str]:
+    return {s["trace_id"] for s in _read_all_sessions(cli_api, live, **params)}
+
+
+def _consistent_read(cli_api, window: dict, read: Callable[[], T]) -> T:
+    """``read()`` taken between two identical Overview reads of the window.
+
+    Other runs on a shared stand ingest back-dated sessions into past windows and delete their
+    projects, which removes sessions again. Figures read on both sides of such a change describe
+    different data, so the read is taken again, at most CONSISTENT_READ_ATTEMPTS times, until
+    the window has not changed around it. Pages that disagree with their total count as a change
+    only when the window did change; otherwise they fail the test. Assertions run once, on that
+    one state of the stand; a window that changes during every read fails the test.
+    """
+    changes = []
+    for _ in range(CONSISTENT_READ_ATTEMPTS):
+        before = cli_api.get_data("overview", **window)["kpis"]
+        try:
+            result, disagreement = read(), None
+        except PagesDisagree as error:
+            result, disagreement = None, error
+        after = cli_api.get_data("overview", **window)["kpis"]
+        if after == before:
+            if disagreement:
+                raise disagreement  # the window did not change: its pages are wrong
+            return result
+        changes.append((before["total_sessions"], after["total_sessions"]))
+    pytest.fail(
+        f"The window {window} changed during each of {CONSISTENT_READ_ATTEMPTS} reads "
+        f"(sessions before, after: {changes}); its figures cannot be compared"
+    )
+
+
+def _assert_same_sessions(returned: set[str], expected: set[str], what: str) -> None:
+    """Fails with the sessions missing from and unexpected in ``returned``, not both lists."""
+    assert_that(
+        {
+            "missing": sorted(expected - returned),
+            "unexpected": sorted(returned - expected),
+        },
+        equal_to({"missing": [], "unexpected": []}),
+        what,
+    )
+
+
+def _spend_sessions(snapshot) -> int:
+    """Sessions with a cost row: Cost's average spreads the total cost over them, not over all."""
+    kpis = snapshot["cost"]["kpis"]
+    if not kpis["avg_cost_per_session"]:
+        assert_that(kpis["total_cost_usd"] or 0, equal_to(0), "cost without an average")
+        return 0
+    count = kpis["total_cost_usd"] / kpis["avg_cost_per_session"]
+    assert_that(
+        abs(count - round(count)),
+        less_than(1e-3),
+        f"total_cost_usd / avg_cost_per_session = {count} is a whole number of sessions",
+    )
+    return round(count)
 
 
 def _top_repository(snapshot) -> dict:
@@ -131,7 +226,7 @@ def cli_api(client, cli_analytics_enabled) -> CliAnalyticsApi:
 
 @pytest.fixture(scope="module")
 def window() -> dict:
-    """Closed window [today-8d 00:00, today-1d 00:00) UTC; its data no longer moves."""
+    """Closed window [today-8d 00:00, today-1d 00:00) UTC; real sessions in it no longer move."""
     today = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
@@ -141,9 +236,7 @@ def window() -> dict:
     }
 
 
-@pytest.fixture(scope="module")
-def snapshot(cli_api, window) -> dict:
-    """Every aggregate endpoint read once for the window."""
+def _read_snapshot(cli_api, window: dict) -> dict:
     data = {
         name: cli_api.get_data(name, **window)
         for name in (
@@ -161,9 +254,14 @@ def snapshot(cli_api, window) -> dict:
         "repositories", include_branches=True, **window
     )
     data["repositories_by_name"] = _read_all_rows(cli_api, "repositories", **window)
-    data["sessions"] = cli_api.get_data(
-        "sessions", page=0, per_page=MAX_PER_PAGE, **window
-    )
+    data["sessions"] = _read_all_sessions(cli_api, **window)
+    return data
+
+
+@pytest.fixture(scope="module")
+def snapshot(cli_api, window) -> dict:
+    """Every aggregate endpoint and every session of the window, read in one consistent state."""
+    data = _consistent_read(cli_api, window, lambda: _read_snapshot(cli_api, window))
     if not data["overview"]["kpis"]["total_sessions"]:
         pytest.skip(f"No CLI sessions in the window {window}: nothing to reconcile")
     return data
@@ -171,14 +269,8 @@ def snapshot(cli_api, window) -> dict:
 
 @pytest.fixture(scope="module")
 def all_sessions(snapshot) -> list[dict]:
-    """Every session of the window; the window must fit one page to be reconciled row by row."""
-    sessions = snapshot["sessions"]
-    if sessions["total"] > MAX_PER_PAGE:
-        pytest.skip(
-            f"{sessions['total']} sessions do not fit one page of {MAX_PER_PAGE}"
-        )
-    assert_that(len(sessions["sessions"]), equal_to(sessions["total"]))
-    return sessions["sessions"]
+    """Every session of the window, read page by page with the snapshot."""
+    return snapshot["sessions"]
 
 
 def _kpis(snapshot) -> dict:
@@ -193,7 +285,7 @@ def test_session_count_is_the_same_on_every_endpoint(snapshot):
     total = _kpis(snapshot)["total_sessions"]
 
     assert_that(snapshot["cost"]["kpis"]["total_sessions"], equal_to(total), "cost")
-    assert_that(snapshot["sessions"]["total"], equal_to(total), "sessions.total")
+    assert_that(len(snapshot["sessions"]), equal_to(total), "sessions, every page")
     depth = sum(b["count"] for b in snapshot["efficiency"]["session_depth"])
     assert_that(depth, equal_to(total), "sum of efficiency.session_depth")
 
@@ -207,9 +299,13 @@ def test_total_cost_reconciles_across_endpoints_and_breakdowns(snapshot, all_ses
     assert snapshot["efficiency"]["kpis"]["total_cost_usd"] == _approx(total)
     assert sum(r["cost_usd"] for r in cost["cost_by_model"]) == _approx(total)
     assert sum(r["cost_usd"] for r in cost["cost_by_user"]) == _approx(total)
-    assert sum(s["cost_usd"] for s in all_sessions) == _approx(total)
-    assert cost["kpis"]["avg_cost_per_session"] == _approx(
-        total / cost["kpis"]["total_sessions"]
+    assert sum(s["cost_usd"] or 0 for s in all_sessions) == _approx(total)
+    spend_sessions = _spend_sessions(snapshot)
+    assert_that(spend_sessions, greater_than(0), "sessions with a cost row")
+    assert_that(
+        spend_sessions,
+        less_than_or_equal_to(cost["kpis"]["total_sessions"]),
+        "avg_cost_per_session averages over the sessions with a cost row",
     )
 
 
@@ -289,10 +385,13 @@ def test_efficiency_figures_match_overview(snapshot):
     eff = snapshot["efficiency"]
     dead = eff["dead_sessions"]
 
+    spend_sessions = _spend_sessions(snapshot)
+
     assert_that(dead["count"], equal_to(kpis["dead_sessions"]))
-    assert_that(
-        dead["pct_of_sessions"], equal_to(_pct(dead["count"], kpis["total_sessions"]))
-    )
+    # A dead session cost money and changed no file: it is one of the sessions with a cost
+    # row, and its share is taken of them, the denominator of Cost's average too.
+    assert_that(dead["count"], less_than_or_equal_to(spend_sessions))
+    assert_that(dead["pct_of_sessions"], equal_to(_pct(dead["count"], spend_sessions)))
     if dead["count"]:
         assert dead["avg_cost_per_dead"] == _approx(
             dead["wasted_cost_usd"] / dead["count"]
@@ -320,8 +419,11 @@ def test_repository_rows_are_internally_consistent(snapshot, all_sessions):
     assert_that(len(rows), greater_than(0), "repositories in the window")
 
     for row in rows:
+        lines = (row["lines_added"], row["lines_removed"])
         assert_that(
-            row["net_lines"], equal_to(row["lines_added"] - row["lines_removed"]), row
+            row["net_lines"],
+            equal_to(None if None in lines else lines[0] - lines[1]),
+            f"net lines of {row['repository']}: unknown without line data",
         )
         assert_that(
             row["tool_calls_success"], less_than_or_equal_to(row["tool_calls"]), row
@@ -359,36 +461,47 @@ def test_repository_rows_are_internally_consistent(snapshot, all_sessions):
 
 def test_repository_pages_partition_the_full_list(cli_api, window, snapshot):
     """Paged repositories: correct total_count/has_more and pages that concatenate to the full list."""
-    full = [r["repository"] for r in snapshot["repositories_by_name"]["rows"]]
-    per_page = max(1, min(5, len(full) // 2 or 1))
+    per_page = max(1, min(5, len(snapshot["repositories_by_name"]["rows"]) // 2 or 1))
 
-    paged, page = [], 0
-    while True:
-        data = cli_api.get_data("repositories", page=page, per_page=per_page, **window)
-        pagination = data["pagination"]
-        assert_that(pagination["total_count"], equal_to(len(full)))
+    def read():
+        full = _read_all_rows(cli_api, "repositories", **window)["rows"]
+        pages, page = [], 0
+        while True:
+            data = cli_api.get_data(
+                "repositories", page=page, per_page=per_page, **window
+            )
+            pages.append(data)
+            if not data["pagination"]["has_more"] or not data["rows"]:
+                return [r["repository"] for r in full], pages
+            page += 1
+
+    full, pages = _consistent_read(cli_api, window, read)
+
+    paged = []
+    for number, data in enumerate(pages):
+        assert_that(data["pagination"]["total_count"], equal_to(len(full)))
         paged.extend(r["repository"] for r in data["rows"])
         assert_that(
-            pagination["has_more"], equal_to(len(paged) < len(full)), f"page {page}"
+            data["pagination"]["has_more"],
+            equal_to(len(paged) < len(full)),
+            f"page {number}",
         )
-        if not pagination["has_more"]:
-            break
-        page += 1
-
     assert_that(paged, equal_to(full))
 
 
-def test_unattributed_filter_returns_sessions_without_repository(
-    cli_api, window, all_sessions
-):
+def test_unattributed_filter_returns_sessions_without_repository(cli_api, window):
     """is_unattributed=true returns exactly the sessions that report no repository."""
-    expected = sorted(s["trace_id"] for s in all_sessions if not s["repository"])
-
-    data = cli_api.get_data(
-        "sessions", is_unattributed="true", per_page=MAX_PER_PAGE, **window
+    sessions, returned = _consistent_read(
+        cli_api,
+        window,
+        lambda: (
+            _read_all_sessions(cli_api, **window),
+            _session_ids(cli_api, is_unattributed="true", **window),
+        ),
     )
 
-    assert_that(sorted(s["trace_id"] for s in data["sessions"]), equal_to(expected))
+    expected = {s["trace_id"] for s in sessions if not s["repository"]}
+    _assert_same_sessions(returned, expected, "is_unattributed=true")
 
 
 # ── Sessions list and detail ──────────────────────────────────────────────────
@@ -424,11 +537,16 @@ def test_sessions_are_sorted_and_inside_the_window(cli_api, window, sort_by):
 
 def test_session_pages_are_disjoint_and_contiguous(cli_api, window, snapshot):
     """Pages 0 and 1 of 20 are exactly the first 40 sessions, without repeats or gaps."""
-    if snapshot["sessions"]["total"] < 40:
+    if len(snapshot["sessions"]) < 40:
         pytest.skip("fewer than 40 sessions in the window")
-    page0 = cli_api.get_data("sessions", page=0, per_page=20, **window)
-    page1 = cli_api.get_data("sessions", page=1, per_page=20, **window)
-    first40 = cli_api.get_data("sessions", page=0, per_page=40, **window)
+    page0, page1, first40 = _consistent_read(
+        cli_api,
+        window,
+        lambda: tuple(
+            cli_api.get_data("sessions", page=page, per_page=per_page, **window)
+            for page, per_page in ((0, 20), (1, 20), (0, 40))
+        ),
+    )
 
     ids = [s["trace_id"] for s in page0["sessions"] + page1["sessions"]]
     assert_that(len(set(ids)), equal_to(40))
@@ -438,13 +556,17 @@ def test_session_pages_are_disjoint_and_contiguous(cli_api, window, snapshot):
 
 def test_session_detail_matches_its_list_row(cli_api, window):
     """The detail of the most expensive sessions repeats the figures of their list rows."""
-    rows = cli_api.get_data(
-        "sessions", sort_by="cost_usd", per_page=DETAIL_SAMPLE, **window
-    )["sessions"]
-    assert_that(len(rows), greater_than(0))
 
-    for row in rows:
-        detail = cli_api.get_data(f"sessions/{row['trace_id']}")
+    def read():
+        rows = cli_api.get_data(
+            "sessions", sort_by="cost_usd", per_page=DETAIL_SAMPLE, **window
+        )["sessions"]
+        return [(row, cli_api.get_data(f"sessions/{row['trace_id']}")) for row in rows]
+
+    pairs = _consistent_read(cli_api, window, read)
+    assert_that(len(pairs), greater_than(0))
+
+    for row, detail in pairs:
         assert_that(detail["trace_id"], equal_to(row["trace_id"]))
         actual = {k: detail[k] for k in DETAIL_FIELDS}
         assert_that(
@@ -462,45 +584,50 @@ def test_session_detail_tool_success_matches_its_aggregate(cli_api, window):
     """A session's detail reports the tool calls and success rate the aggregates count for it.
 
     The session is isolated in the aggregates by a one-second window at its start, its user
-    and its repository; only sessions that are alone in that slice are compared. Only the
-    known defect is expected to fail: the same call count with a lower detail success rate.
-    Any other difference, an error status or a wrong count fails the test.
+    and its repository; only sessions that are alone in that slice are compared. The detail,
+    its list row and the Overview read the same tool rollup, so any difference fails.
     """
-    rows = cli_api.get_data("sessions", sort_by="cost_usd", per_page=30, **window)[
-        "sessions"
-    ]
-    compared = []
-    for row in rows:
-        if not row["tool_call_count"] or not row["repository"]:
-            continue
-        start = _ts(row["start_time"])
-        overview = cli_api.get_data(
-            "overview",
-            start_date=start.isoformat(),
-            end_date=(start + timedelta(seconds=1)).isoformat(),
-            users=row["user_email"],
-            repositories=row["repository"],
-        )["kpis"]
-        if overview["total_sessions"] != 1:
-            continue
-        detail = cli_api.get_data(f"sessions/{row['trace_id']}")
-        compared.append(
-            (
-                row["trace_id"],
-                (detail["tool_call_count"], detail["tool_success_rate"]),
-                (overview["total_tool_calls"], overview["tool_call_success_rate"]),
+
+    def read():
+        rows = cli_api.get_data("sessions", sort_by="cost_usd", per_page=30, **window)[
+            "sessions"
+        ]
+        compared = []
+        for row in rows:
+            if not row["tool_call_count"] or not row["repository"]:
+                continue
+            start = _ts(row["start_time"])
+            overview = cli_api.get_data(
+                "overview",
+                start_date=start.isoformat(),
+                end_date=(start + timedelta(seconds=1)).isoformat(),
+                users=row["user_email"],
+                repositories=row["repository"],
+            )["kpis"]
+            if overview["total_sessions"] != 1:
+                continue
+            detail = cli_api.get_data(f"sessions/{row['trace_id']}")
+            compared.append(
+                (
+                    row["trace_id"],
+                    (detail["tool_call_count"], detail["tool_success_rate"]),
+                    (overview["total_tool_calls"], overview["tool_call_success_rate"]),
+                )
             )
-        )
-        if len(compared) == DETAIL_SAMPLE:
-            break
+            if len(compared) == DETAIL_SAMPLE:
+                break
+        return compared
+
+    compared = _consistent_read(cli_api, window, read)
 
     if not compared:
         pytest.skip("no session with tool calls is alone in its aggregate slice")
     mismatched = [c for c in compared if c[1] != c[2]]
-    unexpected = [c for c in mismatched if c[1][0] != c[2][0] or not c[1][1] < c[2][1]]
-    assert_that(unexpected, equal_to([]), "(trace_id, detail, aggregate) of mismatches")
-    if mismatched:
-        pytest.xfail(f"{TOOL_SUCCESS_DEFECT}: {mismatched}")
+    assert_that(
+        mismatched,
+        equal_to([]),
+        "(trace_id, (detail calls, rate), (aggregate calls, rate)) of mismatches",
+    )
 
 
 def test_unknown_session_returns_404(cli_api):
@@ -518,12 +645,23 @@ def test_unknown_session_returns_404(cli_api):
 
 def test_user_filter_returns_exactly_that_users_row(cli_api, window, snapshot):
     """Filtered by the top user, every endpoint reports exactly that user's row."""
-    user = snapshot["user-charts"]["rows"][0]
-    params = {**window, "users": user["user_email"]}
+    email = snapshot["user-charts"]["rows"][0]["user_email"]
+    params = {**window, "users": email}
 
-    kpis = cli_api.get_data("overview", **params)["kpis"]
-    sessions = cli_api.get_data("sessions", per_page=MAX_PER_PAGE, **params)
-    cost_users = cli_api.get_data("cost", **params)["cost_by_user"]
+    user, kpis, sessions, cost_users = _consistent_read(
+        cli_api,
+        window,
+        lambda: (
+            next(
+                r
+                for r in cli_api.get_data("user-charts", **window)["rows"]
+                if r["user_email"] == email
+            ),
+            cli_api.get_data("overview", **params)["kpis"],
+            _read_all_sessions(cli_api, **params),
+            cli_api.get_data("cost", **params)["cost_by_user"],
+        ),
+    )
 
     assert_that(
         (kpis["total_sessions"], kpis["total_turns"], kpis["total_tool_calls"]),
@@ -531,10 +669,8 @@ def test_user_filter_returns_exactly_that_users_row(cli_api, window, snapshot):
     )
     assert kpis["total_cost_usd"] == _approx(user["cost_usd"])
     assert_that(kpis["tool_call_success_rate"], equal_to(user["tool_success_rate"]))
-    assert_that(sessions["total"], equal_to(user["session_count"]))
-    assert_that(
-        {s["user_email"] for s in sessions["sessions"]}, equal_to({user["user_email"]})
-    )
+    assert_that(len(sessions), equal_to(user["session_count"]))
+    assert_that({s["user_email"] for s in sessions}, equal_to({user["user_email"]}))
     assert_that([r["user_email"] for r in cost_users], equal_to([user["user_email"]]))
 
 
@@ -542,11 +678,22 @@ def test_repository_filter_returns_exactly_that_repository_row(
     cli_api, window, snapshot
 ):
     """Filtered by the top repository, Overview and Sessions report exactly its row."""
-    repo = _top_repository(snapshot)
-    params = {**window, "repositories": repo["repository"]}
+    name = _top_repository(snapshot)["repository"]
+    params = {**window, "repositories": name}
 
-    kpis = cli_api.get_data("overview", **params)["kpis"]
-    sessions = cli_api.get_data("sessions", per_page=MAX_PER_PAGE, **params)
+    repo, kpis, sessions = _consistent_read(
+        cli_api,
+        window,
+        lambda: (
+            next(
+                r
+                for r in _read_all_rows(cli_api, "repositories", **window)["rows"]
+                if r["repository"] == name
+            ),
+            cli_api.get_data("overview", **params)["kpis"],
+            _read_all_sessions(cli_api, **params),
+        ),
+    )
 
     assert_that(
         (kpis["total_sessions"], kpis["total_turns"], kpis["total_tool_calls"]),
@@ -555,32 +702,39 @@ def test_repository_filter_returns_exactly_that_repository_row(
     assert kpis["total_cost_usd"] == _approx(repo["cost_usd"])
     assert_that(kpis["net_lines"], equal_to(repo["net_lines"]))
     assert_that(kpis["tool_call_success_rate"], equal_to(repo["tool_success_rate"]))
-    assert_that(
-        {s["repository"] for s in sessions["sessions"]}, equal_to({repo["repository"]})
-    )
-    assert_that(sessions["total"], equal_to(repo["session_count"]))
+    assert_that({s["repository"] for s in sessions}, equal_to({repo["repository"]}))
+    assert_that(len(sessions), equal_to(repo["session_count"]))
 
 
-def test_branch_filter_returns_that_branchs_sessions(
-    cli_api, window, snapshot, all_sessions
-):
+def test_branch_filter_returns_that_branchs_sessions(cli_api, window, all_sessions):
     """branch= returns exactly the sessions on that branch, as many as its repository rows count."""
     branches = Counter(s["branch"] for s in all_sessions if s["branch"])
     if not branches:
         pytest.skip("no session in the window reports a branch")
-    branch, expected = branches.most_common(1)[0]
+    branch = branches.most_common(1)[0][0]
+
+    sessions, repositories, filtered = _consistent_read(
+        cli_api,
+        window,
+        lambda: (
+            _read_all_sessions(cli_api, **window),
+            cli_api.get_data("repositories", include_branches=True, **window)["rows"],
+            _read_all_sessions(cli_api, branch=branch, **window),
+        ),
+    )
+
+    expected = {s["trace_id"] for s in sessions if s["branch"] == branch}
     branch_rows = [
         b
-        for r in snapshot["repositories"]["rows"]
+        for r in repositories
         for b in (r["branches"] or [])
         if b.get("branch") == branch
     ]
-
-    data = cli_api.get_data("sessions", branch=branch, per_page=MAX_PER_PAGE, **window)
-
-    assert_that(data["total"], equal_to(expected))
-    assert_that({s["branch"] for s in data["sessions"]}, equal_to({branch}))
-    assert_that(sum(b["session_count"] for b in branch_rows), equal_to(expected))
+    _assert_same_sessions(
+        {s["trace_id"] for s in filtered}, expected, f"branch={branch}"
+    )
+    assert_that({s["branch"] for s in filtered}, equal_to({branch}))
+    assert_that(sum(b["session_count"] for b in branch_rows), equal_to(len(expected)))
 
 
 def test_framework_filter_and_framework_labels(cli_api, window, snapshot, all_sessions):
@@ -589,37 +743,48 @@ def test_framework_filter_and_framework_labels(cli_api, window, snapshot, all_se
     used = Counter(s["delivery_framework"] for s in all_sessions)
     for framework in used:
         assert_that(framework, is_in(labels))
-    framework, expected = used.most_common(1)[0]
+    framework = used.most_common(1)[0][0]
 
-    data = cli_api.get_data(
-        "sessions", framework=framework, per_page=MAX_PER_PAGE, **window
+    sessions, filtered = _consistent_read(
+        cli_api,
+        window,
+        lambda: (
+            _read_all_sessions(cli_api, **window),
+            _read_all_sessions(cli_api, framework=framework, **window),
+        ),
     )
 
-    assert_that(data["total"], equal_to(expected))
-    assert_that(
-        {s["delivery_framework"] for s in data["sessions"]}, equal_to({framework})
+    expected = {s["trace_id"] for s in sessions if s["delivery_framework"] == framework}
+    _assert_same_sessions(
+        {s["trace_id"] for s in filtered}, expected, f"framework={framework}"
     )
+    assert_that({s["delivery_framework"] for s in filtered}, equal_to({framework}))
 
 
-def test_search_matches_prompt_repository_or_branch(
-    cli_api, window, snapshot, all_sessions
-):
+def test_search_matches_prompt_repository_or_branch(cli_api, window, snapshot):
     """search= keeps exactly the sessions whose prompt, repository or branch contains the term,
     case-insensitively."""
     term = _top_repository(snapshot)["repository"].split("/")[-1].upper()
     lowered = term.lower()
-    expected = sorted(
+
+    sessions, returned = _consistent_read(
+        cli_api,
+        window,
+        lambda: (
+            _read_all_sessions(cli_api, **window),
+            _session_ids(cli_api, search=term, **window),
+        ),
+    )
+
+    expected = {
         s["trace_id"]
-        for s in all_sessions
+        for s in sessions
         if lowered in s["prompt"].lower()
         or lowered in (s["repository"] or "").lower()
         or lowered in (s["branch"] or "").lower()
-    )
-
-    data = cli_api.get_data("sessions", search=term, per_page=MAX_PER_PAGE, **window)
-
+    }
     assert_that(len(expected), greater_than(0))
-    assert_that(sorted(s["trace_id"] for s in data["sessions"]), equal_to(expected))
+    _assert_same_sessions(returned, expected, f"search={term}")
 
 
 @pytest.mark.parametrize("period", sorted(TIME_PERIODS))
@@ -629,9 +794,7 @@ def test_time_period_selects_the_same_sessions_as_its_date_range(cli_api, period
     Sessions that started well inside the period (a minute from either edge) must be returned,
     and nothing that started before the period may be."""
     before = datetime.now(timezone.utc)
-    data = cli_api.get_data("sessions", time_period=period, per_page=MAX_PER_PAGE)
-    if data["total"] > MAX_PER_PAGE:
-        pytest.skip(f"{data['total']} sessions in {period} do not fit one page")
+    returned = _session_ids(cli_api, live=True, time_period=period)
 
     earliest = before - TIME_PERIODS[period]
     if period in DAY_BASED_PERIODS:
@@ -639,15 +802,10 @@ def test_time_period_selects_the_same_sessions_as_its_date_range(cli_api, period
     margin = timedelta(minutes=1)
 
     def ids(start: datetime, end: datetime) -> set[str]:
-        page = cli_api.get_data(
-            "sessions",
-            start_date=start.isoformat(),
-            end_date=end.isoformat(),
-            per_page=MAX_PER_PAGE,
+        return _session_ids(
+            cli_api, live=True, start_date=start.isoformat(), end_date=end.isoformat()
         )
-        return {s["trace_id"] for s in page["sessions"]}
 
-    returned = {s["trace_id"] for s in data["sessions"]}
     inner = ids(earliest + margin, before - margin)
     # the API rejects an end_date in the future, so the outer range ends at the last instant read
     outer = ids(earliest - margin, datetime.now(timezone.utc))
