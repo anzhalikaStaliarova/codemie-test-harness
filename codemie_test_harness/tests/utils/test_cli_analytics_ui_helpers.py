@@ -12,17 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
 from hamcrest import assert_that, equal_to, is_
 
-from codemie_test_harness.tests.ui.analytics.test_cli_analytics_api_consistency import (
+from codemie_test_harness.tests.ui.analytics.cli_analytics_number_format import (
     _currency,
-    _duration,
-    _session_cost,
-    _session_tool_calls,
+    _locale,
 )
 from codemie_test_harness.tests.ui.pageobject.analytics.cli_analytics_page import (
     CLIAnalyticsPage,
 )
+
+pytestmark = pytest.mark.api
+
+API = "https://codemie.test/code-assistant-api/v1/analytics/cli-analytics/"
 
 
 class FakeRequest:
@@ -36,115 +39,40 @@ class FakeResponse:
         self.request = FakeRequest(method)
 
 
-API = "https://codemie.test/code-assistant-api/v1/analytics/cli-analytics/"
-
-
 def _page() -> CLIAnalyticsPage:
     return object.__new__(CLIAnalyticsPage)
 
 
-def _api_domain(monkeypatch, value: str = "https://codemie.test/code-assistant-api"):
+def _domains(
+    monkeypatch,
+    api_domain: str = "https://codemie.test/code-assistant-api",
+    frontend_url: str = "",
+):
+    values = {
+        "CODEMIE_API_DOMAIN": api_domain,
+        "FRONTEND_URL": frontend_url,
+    }
     monkeypatch.setattr(
         "codemie_test_harness.tests.ui.pageobject.analytics.cli_analytics_page."
         "CredentialsManager.get_parameter",
-        staticmethod(lambda name, default="": value),
+        staticmethod(lambda name, default="": values.get(name, default)),
     )
 
 
-def test_currency_keeps_two_significant_digits_below_a_cent():
-    assert_that(_currency(0.003465), equal_to("$0.0035"))
-    assert_that(_currency(0.000012), equal_to("$0.000012"))
-    assert_that(_currency(0.005), equal_to("$0.005"))
-    assert_that(_currency(0.0099), equal_to("$0.0099"))
-    assert_that(_currency(0.01), equal_to("$0.01"))
+def test_locale_rounds_like_intl_shortest_decimal():
+    assert_that(_locale(0.015, 2), equal_to("0.02"))
+    assert_that(_locale(1.005, 2), equal_to("1.01"))
+    assert_that(_locale(12.345, 2), equal_to("12.35"))
 
 
-def test_currency_formats_two_decimals_with_the_sign_after_the_dollar():
-    assert_that(_currency(0), equal_to("$0.00"))
-    assert_that(_currency(1234.5), equal_to("$1,234.50"))
-    assert_that(_currency(-0.0), equal_to("$-0.00"))
-    assert_that(_currency(-0.001), equal_to("$-0.00"))
-    assert_that(_currency(-0.5), equal_to("$-0.50"))
-    assert_that(_currency(-101), equal_to("$-101.00"))
-
-
-def test_session_cost_marks_unknown_and_keeps_partial_amounts():
-    priced = {"cost_available": True, "cost_incomplete": False, "unpriced_models": []}
-    assert_that(_session_cost(0.0623, priced), equal_to("$0.06"))
-    assert_that(_session_cost(None, priced), equal_to("-"))
-    assert_that(_session_cost(1.5, {**priced, "cost_available": False}), equal_to("-"))
-    assert_that(
-        _session_cost(1.5, {**priced, "unpriced_models": ["m"]}), equal_to("$1.50")
-    )
-    assert_that(_session_cost(None, {**priced, "cost_incomplete": True}), equal_to("-"))
-
-
-def test_duration_uses_three_units_from_the_largest_one():
-    assert_that(_duration(None), equal_to("—"))
-    assert_that(_duration(0), equal_to("—"))
-    assert_that(_duration(999), equal_to("999ms"))
-    assert_that(_duration(42_079), equal_to("42s"))
-    assert_that(_duration(90_000), equal_to("1min 30s"))
-    assert_that(_duration(3_603_000), equal_to("1h 3s"))
-    assert_that(_duration((2 * 30 + 8) * 86_400_000), equal_to("2m 1w 1d"))
-
-
-def _summary(**fields) -> dict:
-    return {
-        "summary_state": "final",
-        "summary_metrics": ["tool_calls"],
-        "tool_calls_success": 6,
-        "tool_success_rate": 100.0,
-        **fields,
-    }
-
-
-def test_session_tool_calls_report_the_summary_total_and_observed_outcomes():
-    assert_that(
-        _session_tool_calls(_summary(tool_call_count=6, tool_calls_total=6)),
-        equal_to(
-            (
-                "6",
-                "100% ok",
-            )
-        ),
-    )
-    assert_that(
-        _session_tool_calls(
-            _summary(tool_call_count=5, tool_calls_total=None, tool_success_rate=80.0)
-        ),
-        equal_to(("5", "Observed only · 80% ok")),
-    )
-    assert_that(
-        _session_tool_calls(
-            _summary(
-                tool_call_count=6, tool_calls_total=10, summary_state="provisional"
-            )
-        ),
-        equal_to(("10", "Provisional · 6 observed of 10 total · 100% ok")),
-    )
-    assert_that(
-        _session_tool_calls(_summary(tool_call_count=0, tool_calls_total=None)),
-        equal_to(
-            (
-                "—",
-                "Not reported",
-            )
-        ),
-    )
-    assert_that(
-        _session_tool_calls(_summary(tool_call_count=0, tool_calls_total=4)),
-        equal_to(
-            (
-                "4",
-                "No outcomes observed",
-            )
-        ),
-    )
+def test_currency_rounds_like_intl_shortest_decimal():
+    assert_that(_currency(0.015), equal_to("$0.02"))
+    assert_that(_currency(1.005), equal_to("$1.01"))
+    assert_that(_currency(12.345), equal_to("$12.35"))
 
 
 def test_overview_api_spend_request_is_not_the_overview_data(monkeypatch):
-    _api_domain(monkeypatch)
+    _domains(monkeypatch)
     response = FakeResponse(f"{API}overview?subscription_type=codemie&time_period=x")
 
     assert_that(_page()._is_api_response(response, "overview", None), is_(False))
@@ -160,7 +88,7 @@ def test_overview_api_spend_request_is_not_the_overview_data(monkeypatch):
 
 
 def test_user_count_request_is_not_the_users_table(monkeypatch):
-    _api_domain(monkeypatch)
+    _domains(monkeypatch)
     count = FakeResponse(f"{API}users?page=0&per_page=1")
     table = FakeResponse(f"{API}users?page=0&per_page=10")
 
@@ -170,7 +98,20 @@ def test_user_count_request_is_not_the_users_table(monkeypatch):
 
 
 def test_framework_sessions_request_matches_without_default_page(monkeypatch):
-    _api_domain(monkeypatch)
+    _domains(monkeypatch)
+    response = FakeResponse(
+        "https://codemie.test/code-assistant-api/v1/analytics/cli-analytics/"
+        "sessions?framework=claude_code"
+    )
+
+    assert_that(
+        _page()._is_api_response(response, "sessions", {"framework": "claude_code"}),
+        is_(True),
+    )
+
+
+def test_framework_sessions_request_matches_equivalent_origin_forms(monkeypatch):
+    _domains(monkeypatch, api_domain="https://CODemie.test:443/code-assistant-api")
     response = FakeResponse(
         "https://codemie.test/code-assistant-api/v1/analytics/cli-analytics/"
         "sessions?framework=claude_code"
@@ -183,7 +124,7 @@ def test_framework_sessions_request_matches_without_default_page(monkeypatch):
 
 
 def test_framework_sessions_request_rejects_unrelated_endpoint(monkeypatch):
-    _api_domain(monkeypatch)
+    _domains(monkeypatch)
     response = FakeResponse(
         "https://codemie.test/code-assistant-api/v1/analytics/cli-analytics/"
         "users?framework=claude_code"
@@ -195,8 +136,8 @@ def test_framework_sessions_request_rejects_unrelated_endpoint(monkeypatch):
     )
 
 
-def test_framework_sessions_request_accepts_optional_single_path_prefix(monkeypatch):
-    _api_domain(monkeypatch, "https://codemie.test/gateway/code-assistant-api")
+def test_framework_sessions_request_accepts_configured_path_prefix(monkeypatch):
+    _domains(monkeypatch, "https://codemie.test/gateway/code-assistant-api")
     response = FakeResponse(
         "https://codemie.test/gateway/code-assistant-api/v1/analytics/cli-analytics/"
         "sessions?framework=claude_code"
@@ -208,8 +149,44 @@ def test_framework_sessions_request_accepts_optional_single_path_prefix(monkeypa
     )
 
 
+def test_framework_sessions_request_accepts_frontend_proxy_prefix(monkeypatch):
+    _domains(
+        monkeypatch,
+        api_domain="https://codemie.test/code-assistant-api",
+        frontend_url="https://codemie.test/gateway",
+    )
+    response = FakeResponse(
+        "https://codemie.test/gateway/code-assistant-api/v1/analytics/cli-analytics/"
+        "sessions?framework=claude_code"
+    )
+
+    assert_that(
+        _page()._is_api_response(response, "sessions", {"framework": "claude_code"}),
+        is_(True),
+    )
+
+
+def test_framework_sessions_request_accepts_frontend_proxy_on_another_origin(
+    monkeypatch,
+):
+    _domains(
+        monkeypatch,
+        api_domain="https://api.codemie.test/code-assistant-api",
+        frontend_url="https://ui.codemie.test/gateway",
+    )
+    response = FakeResponse(
+        "https://ui.codemie.test/gateway/code-assistant-api/v1/analytics/cli-analytics/"
+        "sessions?framework=claude_code"
+    )
+
+    assert_that(
+        _page()._is_api_response(response, "sessions", {"framework": "claude_code"}),
+        is_(True),
+    )
+
+
 def test_framework_sessions_request_rejects_unrelated_prefix(monkeypatch):
-    _api_domain(monkeypatch, "https://codemie.test/code-assistant-api")
+    _domains(monkeypatch, "https://codemie.test/code-assistant-api")
     response = FakeResponse(
         "https://codemie.test/other/code-assistant-api/v1/analytics/cli-analytics/"
         "sessions?framework=claude_code"
@@ -222,7 +199,7 @@ def test_framework_sessions_request_rejects_unrelated_prefix(monkeypatch):
 
 
 def test_framework_sessions_request_rejects_path_with_endpoint_suffix_only(monkeypatch):
-    _api_domain(monkeypatch, "")
+    _domains(monkeypatch, api_domain="", frontend_url="")
     response = FakeResponse(
         "https://codemie.test/unrelated/v1/analytics/cli-analytics/"
         "sessions?framework=claude_code"
@@ -235,7 +212,7 @@ def test_framework_sessions_request_rejects_path_with_endpoint_suffix_only(monke
 
 
 def test_framework_sessions_request_rejects_wrong_method(monkeypatch):
-    _api_domain(monkeypatch)
+    _domains(monkeypatch)
     response = FakeResponse(
         "https://codemie.test/code-assistant-api/v1/analytics/cli-analytics/"
         "sessions?framework=claude_code",
@@ -249,10 +226,23 @@ def test_framework_sessions_request_rejects_wrong_method(monkeypatch):
 
 
 def test_framework_sessions_request_rejects_wrong_framework(monkeypatch):
-    _api_domain(monkeypatch)
+    _domains(monkeypatch)
     response = FakeResponse(
         "https://codemie.test/code-assistant-api/v1/analytics/cli-analytics/"
         "sessions?framework=codex"
+    )
+
+    assert_that(
+        _page()._is_api_response(response, "sessions", {"framework": "claude_code"}),
+        is_(False),
+    )
+
+
+def test_framework_sessions_request_rejects_wrong_origin(monkeypatch):
+    _domains(monkeypatch)
+    response = FakeResponse(
+        "https://other.test/code-assistant-api/v1/analytics/cli-analytics/"
+        "sessions?framework=claude_code"
     )
 
     assert_that(

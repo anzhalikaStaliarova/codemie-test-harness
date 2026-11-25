@@ -409,6 +409,12 @@ def pytest_collection_finish(session):
         )
 
 
+def pytest_collectreport(report):
+    """Fail closed on cleanup when collection of any node failed."""
+    if report.failed:
+        production_safety.mark_collection_incomplete()
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_setup(item):
     with production_safety.read_only_test(item):
@@ -446,16 +452,6 @@ def cli_analytics_state_changes_allowed():
     refusal = production_safety.state_change_refusal()
     if refusal:
         pytest.skip(f"State-changing CLI Analytics fixture refused: {refusal}")
-
-
-@pytest.fixture(scope="session")
-def cli_analytics_isolated_environment(cli_analytics_state_changes_allowed):
-    """Require a stand declared disposable before synthetic telemetry changes its totals."""
-    if not production_safety.disposable_environment_declared():
-        pytest.skip(
-            "needs an isolated stand declared with "
-            f"{production_safety.DISPOSABLE_ENVIRONMENT}=true: the test changes its totals"
-        )
 
 
 @pytest.fixture(scope="session")
@@ -566,12 +562,14 @@ def similarity_workflow_yaml(default_llm):
 
 
 @pytest.fixture(scope="session")
-def similarity_check(client, similarity_workflow_yaml, workflow_utils):
+def similarity_check(
+    client, similarity_workflow_yaml, workflow_utils, writable_test_project
+):
     workflow_name = get_random_name()
     create_request = WorkflowCreateRequest(
         name=workflow_name,
         description="Similarity expert",
-        project=PROJECT,
+        project=writable_test_project,
         yaml_config=similarity_workflow_yaml,
         mode=WorkflowMode.SEQUENTIAL,
         shared=False,
@@ -866,11 +864,12 @@ def categories_utils(client):
     return CategoriesUtils(client)
 
 
-@pytest.fixture(scope="session", autouse=True)
-def ensure_test_project(admin_utils):
-    """Ensure the test project exists before running tests; a read-only run creates nothing."""
-    if production_safety.is_read_only_run():
-        logger.info(f"Read-only run: test project '{PROJECT}' is not created.")
+_test_project_ready = False
+
+
+def _ensure_test_project_exists(admin_utils) -> None:
+    global _test_project_ready
+    if _test_project_ready:
         return
     logger.info(f"Ensuring test project '{PROJECT}' exists...")
     filtered_projects = admin_utils.list_projects(PROJECT)
@@ -878,6 +877,37 @@ def ensure_test_project(admin_utils):
         admin_utils.create_project(PROJECT)
         logger.info(f"Created test project '{PROJECT}'.")
     logger.info(f"Test project '{PROJECT}' is ready.")
+    _test_project_ready = True
+
+
+@pytest.fixture(scope="session")
+def writable_test_project(admin_utils):
+    """Ensure PROJECT exists before a session-scoped state-changing fixture uses it."""
+    if not production_safety.run_mode_decided():
+        pytest.skip(
+            "Read-only safety mode was not finalized; shared test project is not created."
+        )
+    if not production_safety.state_changes_allowed():
+        pytest.skip(
+            f"State-changing fixture requires writable run; project '{PROJECT}' is not created."
+        )
+    _ensure_test_project_exists(admin_utils)
+    return PROJECT
+
+
+@pytest.fixture(scope="session", autouse=True)
+def ensure_test_project(admin_utils):
+    """Ensure the shared test project exists before session fixtures need it."""
+    if not production_safety.run_mode_decided():
+        logger.info(
+            "Read-only safety mode was not finalized: the shared test project is not "
+            "created."
+        )
+        return
+    if not production_safety.state_changes_allowed():
+        logger.info(f"Read-only scope: test project '{PROJECT}' is not created.")
+        return
+    _ensure_test_project_exists(admin_utils)
 
 
 @pytest.fixture(scope="session")
@@ -2880,7 +2910,15 @@ def pytest_sessionfinish(session):
     those five are skipped outright instead of hitting the API and logging
     an error every run.
     """
-    if not hasattr(session.config, "workerinput"):
+    is_worker = hasattr(session.config, "workerinput")
+    is_xdist_controller = bool(
+        session.config.getoption("numprocesses", default=None)
+    ) and (not is_worker)
+    if is_xdist_controller:
+        _release_marketplace_core_gates()
+        logger.info("Session cleanup is delegated to xdist workers.")
+        return
+    if not is_worker:
         _release_marketplace_core_gates()
 
     if CredentialsManager.get_parameter("CLEANUP_DATA", "true").lower() != "true":
@@ -2888,8 +2926,9 @@ def pytest_sessionfinish(session):
     if session.config.option.collectonly or getattr(session, "testscollected", 0) == 0:
         logger.info("Session cleanup skipped: no test body executed.")
         return
-    if production_safety.is_read_only_run():
-        logger.info("Read-only run: session cleanup skipped, nothing was created.")
+    refusal = production_safety.session_cleanup_refusal(is_xdist_controller=False)
+    if refusal:
+        logger.info(f"Session cleanup skipped: {refusal}.")
         return
 
     logger.info("Starting session cleanup...")

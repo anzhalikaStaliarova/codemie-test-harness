@@ -13,11 +13,13 @@
 # limitations under the License.
 
 import pytest
-from hamcrest import assert_that, contains_string, equal_to, none, same_instance
+from hamcrest import assert_that, contains_string, equal_to, is_, none, same_instance
 import requests
 
 from codemie_test_harness.tests.enums.environment import Environment
 from codemie_test_harness.tests.utils import production_safety
+
+pytestmark = pytest.mark.api
 
 
 class FakeItem:
@@ -39,6 +41,9 @@ def _settings(monkeypatch, values: dict[str, str] | None = None) -> None:
         staticmethod(lambda name, default="": (values or {}).get(name, default)),
     )
     monkeypatch.setattr(production_safety, "_read_only_run", False)
+    monkeypatch.setattr(production_safety, "_run_mode_decided", False)
+    monkeypatch.setattr(production_safety, "_collection_incomplete", False)
+    monkeypatch.setattr(production_safety, "_guarded_tests", 0)
 
 
 def _stand(monkeypatch, environment: Environment) -> None:
@@ -130,6 +135,143 @@ def test_all_runnable_read_only_cli_analytics_tests_require_guard(monkeypatch):
 
     assert_that(production_safety.transport_guard_required(items), same_instance(True))
     assert_that(production_safety.configure_run(items), same_instance(True))
+
+
+def test_state_changes_are_refused_for_read_only_item_in_mixed_run(monkeypatch):
+    _settings(monkeypatch)
+
+    assert_that(
+        production_safety.state_changes_allowed(
+            FakeItem("cli_analytics", "prod_regression")
+        ),
+        is_(False),
+    )
+    assert_that(production_safety.state_changes_allowed(FakeItem("api")), is_(True))
+
+
+def test_state_changes_are_refused_while_read_only_test_is_guarded(monkeypatch):
+    _settings(monkeypatch)
+    item = FakeItem("cli_analytics", "prod_regression")
+
+    with production_safety.read_only_test(item):
+        assert_that(production_safety.state_changes_allowed(item), is_(False))
+        assert_that(production_safety.state_changes_allowed(), is_(False))
+
+
+def test_cleanup_fails_closed_on_xdist_controller_without_run_decision(monkeypatch):
+    _settings(monkeypatch)
+
+    assert_that(
+        production_safety.session_cleanup_refusal(is_xdist_controller=True),
+        equal_to("read-only safety mode was not finalized on the xdist controller"),
+    )
+
+
+def test_cleanup_is_skipped_for_decided_read_only_run(monkeypatch):
+    _settings(monkeypatch)
+    production_safety.configure_run([FakeItem("cli_analytics", "prod_regression")])
+
+    assert_that(
+        production_safety.session_cleanup_refusal(is_xdist_controller=False),
+        equal_to("the run is read-only"),
+    )
+
+
+def test_cleanup_fails_closed_when_collection_is_incomplete(monkeypatch):
+    _settings(monkeypatch)
+    production_safety.mark_collection_incomplete()
+
+    assert_that(
+        production_safety.session_cleanup_refusal(is_xdist_controller=False),
+        equal_to("collection was incomplete or failed"),
+    )
+
+
+def test_cleanup_is_allowed_after_writable_run_is_decided(monkeypatch):
+    _settings(monkeypatch)
+    production_safety.configure_run([FakeItem("api")])
+
+    assert_that(
+        production_safety.session_cleanup_refusal(is_xdist_controller=False), none()
+    )
+
+
+def test_is_forbidden_matches_equivalent_https_origins(monkeypatch):
+    _settings(
+        monkeypatch,
+        {
+            "CODEMIE_API_DOMAIN": "https://Codemie.Test:443/code-assistant-api",
+            "FRONTEND_URL": "https://Ui.Codemie.Test:443",
+        },
+    )
+
+    assert_that(
+        production_safety.is_forbidden(
+            "POST", "https://codemie.test/code-assistant-api/v1/projects"
+        ),
+        is_(True),
+    )
+    assert_that(
+        production_safety.is_forbidden(
+            "POST", "https://ui.codemie.test:443/v1/local-auth/login"
+        ),
+        is_(False),
+    )
+
+
+def test_is_forbidden_matches_equivalent_http_origins(monkeypatch):
+    _settings(
+        monkeypatch,
+        {
+            "CODEMIE_API_DOMAIN": "http://LOCALHOST:80/code-assistant-api",
+            "FRONTEND_URL": "http://localhost:80",
+        },
+    )
+
+    assert_that(
+        production_safety.is_forbidden(
+            "POST", "http://localhost/code-assistant-api/v1/projects"
+        ),
+        is_(True),
+    )
+
+
+def test_is_forbidden_normalizes_trailing_dot_in_host(monkeypatch):
+    _settings(
+        monkeypatch,
+        {"CODEMIE_API_DOMAIN": "https://codemie.test./code-assistant-api"},
+    )
+
+    assert_that(
+        production_safety.is_forbidden(
+            "POST", "https://codemie.test/code-assistant-api/v1/projects"
+        ),
+        is_(True),
+    )
+
+
+def test_is_forbidden_handles_equivalent_base_path_variants(monkeypatch):
+    _settings(
+        monkeypatch,
+        {
+            "CODEMIE_API_DOMAIN": "https://codemie.test/gateway/code-assistant-api/",
+            "FRONTEND_URL": "https://codemie.test/gateway",
+        },
+    )
+
+    assert_that(
+        production_safety.is_forbidden(
+            "POST", "https://codemie.test/gateway/code-assistant-api/v1/projects"
+        ),
+        is_(True),
+    )
+    assert_that(
+        production_safety.is_forbidden(
+            "POST",
+            "https://codemie.test/gateway/code-assistant-api/v1/local-auth/login",
+        ),
+        is_(False),
+    )
 
 
 def test_read_only_run_rejects_state_changing_http_request(monkeypatch):

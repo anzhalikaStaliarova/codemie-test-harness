@@ -43,7 +43,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from hamcrest import assert_that, contains_string, equal_to, is_not
+from hamcrest import assert_that, contains_string, equal_to, is_in, is_not
 
 from codemie_test_harness.otlp_builder import (
     build_hook_events,
@@ -105,6 +105,9 @@ _EXPECTED_DURATION_MS = int(
     ).total_seconds()
     * 1000
 )
+# Hook timestamps are truncated to milliseconds while span times keep microseconds, so the
+# computed duration can differ by 1 ms depending on the microsecond boundary.
+_EXPECTED_DURATION_MS_VALUES = (_EXPECTED_DURATION_MS, _EXPECTED_DURATION_MS + 1)
 _EXPECTED_TOOL_SUCCESS_COUNT = 1  # Bash succeeds, Write errors
 _EXPECTED_TOOLS = {
     "Bash": (1, 1),
@@ -150,10 +153,8 @@ def _is_fully_rolled_up(detail: dict | None) -> bool:
 
 
 @pytest.fixture(scope="module")
-def isolated_cli_analytics_project(
-    cli_analytics_isolated_environment, create_cli_analytics_project
-):
-    """A disposable project created only on a stand declared disposable."""
+def isolated_cli_analytics_project(create_cli_analytics_project):
+    """A project dedicated to this module and removed in module teardown."""
     return create_cli_analytics_project()
 
 
@@ -331,7 +332,7 @@ def test_resumed_session_reports_combined_totals_and_a_distinct_session_stays_se
     )
     assert_that(
         detail["duration_ms"],
-        equal_to(_EXPECTED_DURATION_MS),
+        is_in(_EXPECTED_DURATION_MS_VALUES),
         f"session duration, detail: {detail}",
     )
 
@@ -352,10 +353,14 @@ def test_resumed_session_reports_combined_totals_and_a_distinct_session_stays_se
             "output_tokens": listed.output_tokens,
             "cache_read_tokens": listed.cache_read_tokens,
             "cache_creation_tokens": listed.cache_creation_tokens,
-            "duration_ms": listed.duration_ms,
         },
-        equal_to({**_EXPECTED_TOTALS, "duration_ms": _EXPECTED_DURATION_MS}),
+        equal_to(_EXPECTED_TOTALS),
         f"sessions list row for the resumed session {session_id!r}: {listed}",
+    )
+    assert_that(
+        listed.duration_ms,
+        is_in(_EXPECTED_DURATION_MS_VALUES),
+        f"sessions list duration for the resumed session {session_id!r}: {listed}",
     )
 
     # Negative control: the second session is its own row with its own totals, not merged.

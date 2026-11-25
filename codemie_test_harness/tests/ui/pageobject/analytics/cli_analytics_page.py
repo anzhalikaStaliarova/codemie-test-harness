@@ -28,7 +28,7 @@ re-mounted on every section switch, which re-fetches that section's data.
 
 import re
 from contextlib import ExitStack
-from typing import Callable, NamedTuple, TypeVar
+from typing import NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 from hamcrest import assert_that, equal_to, is_
@@ -47,8 +47,6 @@ from codemie_test_harness.tests.ui.pageobject.base_page import BasePage
 from codemie_test_harness.tests.ui.test_data.analytics_test_data import (
     CLIAnalyticsSection,
 )
-
-T = TypeVar("T")
 
 
 class SectionSpec(NamedTuple):
@@ -86,8 +84,6 @@ class CLIAnalyticsPage(BasePage):
     }
     DEFAULT_SECTION = CLIAnalyticsSection.OVERVIEW
     SECTION_RESPONSE_TIMEOUT_MS = 120_000
-    RENDER_TIMEOUT_MS = 15_000
-    RENDER_POLL_MS = 250
     # The section buttons expose no aria-pressed/aria-selected; the active one is
     # only distinguishable by this background class.
     ACTIVE_SECTION_CLASS = re.compile(r"\bbg-surface-interactive-active\b")
@@ -238,16 +234,73 @@ class CLIAnalyticsPage(BasePage):
 
     # ── Actions ──────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _normalized_origin(url: str) -> str | None:
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if not scheme or not host:
+            return None
+        try:
+            port = parsed.port
+        except ValueError:
+            return None
+        if (
+            port is None
+            or (scheme == "https" and port == 443)
+            or (scheme == "http" and port == 80)
+        ):
+            return f"{scheme}://{host}"
+        return f"{scheme}://{host}:{port}"
+
+    @staticmethod
+    def _path_parts(path: str) -> tuple[str, ...]:
+        return tuple(part for part in path.split("/") if part)
+
+    @staticmethod
+    def _join_bases(
+        frontend_base: tuple[str, ...], api_base: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        if not frontend_base:
+            return api_base
+        if not api_base:
+            return frontend_base
+        if api_base[: len(frontend_base)] == frontend_base:
+            return api_base
+        return frontend_base + api_base
+
+    def _allowed_api_locations(self) -> set[tuple[str, tuple[str, ...]]]:
+        api_domain = CredentialsManager.get_parameter("CODEMIE_API_DOMAIN", "") or ""
+        frontend_url = CredentialsManager.get_parameter("FRONTEND_URL", "") or ""
+        api_origin = self._normalized_origin(api_domain)
+        frontend_origin = self._normalized_origin(frontend_url)
+        if not api_origin:
+            return set()
+        api_base = self._path_parts(urlparse(api_domain).path)
+        frontend_base = self._path_parts(urlparse(frontend_url).path)
+        combined_base = self._join_bases(frontend_base, api_base)
+        locations: set[tuple[str, tuple[str, ...]]] = {(api_origin, api_base)}
+        if frontend_base:
+            locations.add((api_origin, combined_base))
+        if frontend_origin:
+            locations.add((frontend_origin, api_base))
+            locations.add((frontend_origin, combined_base))
+        return locations
+
     def _is_api_response(self, response, endpoint: str, params: dict | None) -> bool:
         """GET response of ``<API_PATH><endpoint>`` whose query has every given param."""
         url = urlparse(response.url)
-        api_domain = CredentialsManager.get_parameter("CODEMIE_API_DOMAIN", "") or ""
-        api_base_path = urlparse(api_domain).path.rstrip("/")
-        expected_suffix = f"{api_base_path}{self.API_PATH}{endpoint}"
-        if response.request.method != "GET" or not url.path.endswith(expected_suffix):
+        if response.request.method != "GET":
             return False
-        prefix = url.path[: -len(expected_suffix)]
-        if prefix.rstrip("/"):
+        origin = self._normalized_origin(response.url)
+        expected_tail = self._path_parts(f"{self.API_PATH}{endpoint}")
+        actual_parts = self._path_parts(url.path)
+        if len(actual_parts) < len(expected_tail):
+            return False
+        base = actual_parts[: len(actual_parts) - len(expected_tail)]
+        if tuple(actual_parts[-len(expected_tail) :]) != expected_tail:
+            return False
+        if (origin, tuple(base)) not in self._allowed_api_locations():
             return False
         query = parse_qs(url.query)
         if self._is_side_request(endpoint, query, params or {}):
@@ -344,21 +397,6 @@ class CLIAnalyticsPage(BasePage):
                 return Object.fromEntries([...row.cells].map((c, i) => [headers[i], norm(c)]));
             })"""
         )
-
-    def rendered_when(self, read: Callable[[], T], expected: T) -> T:
-        """What ``read`` returns once the page renders ``expected``, or after the timeout.
-
-        React re-renders after the response that a wait resolves on; reading the DOM once
-        could see the previous figures. The caller asserts the returned value, so a timeout
-        fails with what was last rendered.
-        """
-        rendered = read()
-        waited = 0
-        while rendered != expected and waited < self.RENDER_TIMEOUT_MS:
-            self.page.wait_for_timeout(self.RENDER_POLL_MS)
-            waited += self.RENDER_POLL_MS
-            rendered = read()
-        return rendered
 
     @step
     def navigate_to(self, responses: dict | None = None):
@@ -467,10 +505,9 @@ class CLIAnalyticsPage(BasePage):
     def filter_by_project(self, project_name: str):
         """Select a project in the sidebar filter and wait for Overview data to reload."""
         region = self.project_filter_region
-        try:
-            region.wait_for(state="visible", timeout=3000)
-        except Exception:
+        if not region.is_visible():
             self.project_filter_section.click()
+        expect(region).to_be_visible(timeout=3000)
         with self.expect_section_data(self.DEFAULT_SECTION):
             region.locator(".p-multiselect").click()
             self.page.get_by_role("searchbox").first.fill(project_name)

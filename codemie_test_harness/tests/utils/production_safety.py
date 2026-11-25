@@ -50,6 +50,8 @@ _read_only_run = False
 _guarded_tests = 0
 _original_send = requests.Session.send
 _transport_guard_installed = False
+_run_mode_decided = False
+_collection_incomplete = False
 
 
 class ReadOnlyViolation(RuntimeError):
@@ -94,17 +96,51 @@ def disposable_environment_declared() -> bool:
 
 def configure_run(items) -> bool:
     """Make the run read-only when asked, or when every runnable item is read-only."""
-    global _read_only_run
+    global _read_only_run, _run_mode_decided
     selected = list(items)
     runnable = [item for item in selected if not any(item.iter_markers(name="skip"))]
     _read_only_run = _setting_enabled(READ_ONLY_RUN) or (
         bool(runnable) and all(is_read_only_item(item) for item in runnable)
+    )
+    _run_mode_decided = (
+        _run_mode_decided or _setting_enabled(READ_ONLY_RUN) or bool(selected)
     )
     return _read_only_run
 
 
 def is_read_only_run() -> bool:
     return _read_only_run
+
+
+def run_mode_decided() -> bool:
+    """True once collection decided whether this process is read-only."""
+    return _run_mode_decided or _setting_enabled(READ_ONLY_RUN)
+
+
+def state_changes_allowed(item=None) -> bool:
+    """True when a setup/teardown action may mutate stand state right now."""
+    if _read_only_run or _setting_enabled(READ_ONLY_RUN):
+        return False
+    if item is not None and is_read_only_item(item):
+        return False
+    return _guarded_tests == 0
+
+
+def mark_collection_incomplete() -> None:
+    """Mark collection as incomplete so session cleanup fails closed."""
+    global _collection_incomplete
+    _collection_incomplete = True
+
+
+def session_cleanup_refusal(is_xdist_controller: bool) -> Optional[str]:
+    """Why session cleanup must be skipped; None when cleanup is allowed."""
+    if _read_only_run or _setting_enabled(READ_ONLY_RUN):
+        return "the run is read-only"
+    if _collection_incomplete:
+        return "collection was incomplete or failed"
+    if is_xdist_controller and not run_mode_decided():
+        return "read-only safety mode was not finalized on the xdist controller"
+    return None
 
 
 def transport_guard_required(items) -> bool:
@@ -114,13 +150,31 @@ def transport_guard_required(items) -> bool:
     )
 
 
+def _normalized_origin(url: str) -> Optional[str]:
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower().rstrip(".")
+    if not scheme or not host:
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if port is None:
+        return f"{scheme}://{host}"
+    if (scheme == "https" and port == 443) or (scheme == "http" and port == 80):
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
 def _guarded_origins() -> set[str]:
     origins = set()
     for name in ("CODEMIE_API_DOMAIN", "FRONTEND_URL"):
         value = CredentialsManager.get_parameter(name, "")
         if value:
-            parts = urlsplit(value)
-            origins.add(f"{parts.scheme}://{parts.netloc}".lower())
+            origin = _normalized_origin(value)
+            if origin:
+                origins.add(origin)
     return origins
 
 
@@ -128,9 +182,9 @@ def is_forbidden(method: str, url: str) -> bool:
     """True for a state-changing call to the CodeMie stand other than signing in."""
     if method.upper() in SAFE_METHODS:
         return False
-    parts = urlsplit(url)
-    if f"{parts.scheme}://{parts.netloc}".lower() not in _guarded_origins():
+    if _normalized_origin(url) not in _guarded_origins():
         return False
+    parts = urlsplit(url)
     return not parts.path.rstrip("/").endswith(SIGN_IN_PATH_SUFFIXES)
 
 

@@ -50,6 +50,9 @@ Each setting is read from the first source that has it:
 | `AUTH_CLIENT_ID`, `AUTH_CLIENT_SECRET` | deployed system, if needed | Keycloak client. Without a client id, `codemie-sdk` is used. Give the secret for a confidential client |
 | `FRONTEND_URL` | UI tests | URL of the CodeMie web UI |
 | `VERIFY_SSL` | optional | `true` to check TLS certificates (default `false`) |
+| `HARNESS_READ_ONLY` | optional, CLI Analytics safety runs | `true` blocks every state-changing request from tests marked `cli_analytics` + `prod_regression` (default `false`) |
+| `CLI_ANALYTICS_ALLOW_STATE_CHANGES` | optional, unknown/non-standard stands | `true` allows state-changing CLI Analytics tests on stands not recognized as Preview/localhost/AWS test stands (default `false`) |
+| `CLI_ANALYTICS_DISPOSABLE_ENVIRONMENT` | optional, isolated telemetry runs | `true` declares the stand disposable for tests that explicitly opt into isolated totals-changing coverage (default `false`) |
 
 On `localhost`, `127.0.0.1`, `0.0.0.0` and `192.168.*` addresses Keycloak is not used: with `AUTH_USERNAME` and `AUTH_PASSWORD` the harness logs in through the backend local login, without them it sends no token. Any other address always logs in through Keycloak.
 

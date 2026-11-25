@@ -156,6 +156,17 @@ class CLIAnalyticsSessionModal(BasePage):
         return self
 
     @step
+    def should_have_header_line(self, line: str):
+        """Assert the dialog header contains exactly one line equal to ``line``."""
+        if not line:
+            return self
+        expect(
+            self.root.get_by_text(line, exact=True),
+            f"Session dialog header line should be {line!r}",
+        ).to_have_count(1)
+        return self
+
+    @step
     def should_be_closed(self):
         """Assert the session dialog is closed."""
         expect(self.root).to_be_hidden(timeout=15000)

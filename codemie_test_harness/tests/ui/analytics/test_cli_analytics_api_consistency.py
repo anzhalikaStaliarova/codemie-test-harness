@@ -37,6 +37,10 @@ from hamcrest import assert_that, equal_to, greater_than, has_length, is_
 from codemie_test_harness.tests.ui.pageobject.analytics.cli_analytics_page import (
     CLIAnalyticsPage,
 )
+from codemie_test_harness.tests.ui.analytics.cli_analytics_number_format import (
+    _currency,
+    _locale,
+)
 from codemie_test_harness.tests.ui.test_data.analytics_test_data import (
     CLIAnalyticsSection,
 )
@@ -72,14 +76,6 @@ def _to_fixed(x: float, digits: int) -> str:
     return f"{'-' if x < 0 else ''}{q}"
 
 
-def _locale(n: float, decimals: int | None = None) -> str:
-    """``toLocaleString('en-US')`` for integers, or with fixed fraction digits."""
-    if decimals is None:
-        return f"{int(n):,}"
-    q = Decimal(n).quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
-    return f"{q:,}"
-
-
 def _js_str(x: float) -> str:
     """``String(number)`` for finite numbers."""
     return str(int(x)) if float(x).is_integer() else repr(float(x))
@@ -93,19 +89,6 @@ def _js_round(x: float) -> int:
 def _sentence(text: str) -> str:
     """Metric captions render with their first letter upper-cased."""
     return text[:1].upper() + text[1:]
-
-
-def _currency(v: float) -> str:
-    """``formatCurrency``: two decimals, but a positive amount below a cent keeps two
-    significant digits; the sign follows the ``$``."""
-    if 0 < v < 0.01:
-        exact = Decimal(v)
-        q = exact.quantize(
-            Decimal(1).scaleb(exact.adjusted() - 1), rounding=ROUND_HALF_UP
-        )
-        return f"${q.normalize():f}"
-    sign = "-" if math.copysign(1, v) < 0 else ""
-    return f"${sign}{_locale(abs(v), 2)}"
 
 
 def _spend(v: float | None) -> str:
@@ -211,6 +194,83 @@ def _tool_success(rate: float | None, calls: int | None) -> str:
     return DASH if not calls else _pct(rate or 0)
 
 
+def test_currency_keeps_two_significant_digits_below_a_cent():
+    assert_that(_currency(0.003465), equal_to("$0.0035"))
+    assert_that(_currency(0.000012), equal_to("$0.000012"))
+    assert_that(_currency(0.005), equal_to("$0.005"))
+    assert_that(_currency(0.0099), equal_to("$0.0099"))
+    assert_that(_currency(0.01), equal_to("$0.01"))
+
+
+def test_currency_formats_two_decimals_with_the_sign_after_the_dollar():
+    assert_that(_currency(0), equal_to("$0.00"))
+    assert_that(_currency(1234.5), equal_to("$1,234.50"))
+    assert_that(_currency(-0.0), equal_to("$-0.00"))
+    assert_that(_currency(-0.001), equal_to("$-0.00"))
+    assert_that(_currency(-0.5), equal_to("$-0.50"))
+    assert_that(_currency(-101), equal_to("$-101.00"))
+
+
+def test_session_cost_marks_unknown_and_keeps_partial_amounts():
+    priced = {"cost_available": True, "cost_incomplete": False, "unpriced_models": []}
+    assert_that(_session_cost(0.0623, priced), equal_to("$0.06"))
+    assert_that(_session_cost(None, priced), equal_to("-"))
+    assert_that(_session_cost(1.5, {**priced, "cost_available": False}), equal_to("-"))
+    assert_that(
+        _session_cost(1.5, {**priced, "unpriced_models": ["m"]}), equal_to("$1.50")
+    )
+    assert_that(_session_cost(None, {**priced, "cost_incomplete": True}), equal_to("-"))
+
+
+def test_duration_uses_three_units_from_the_largest_one():
+    assert_that(_duration(None), equal_to("—"))
+    assert_that(_duration(0), equal_to("—"))
+    assert_that(_duration(999), equal_to("999ms"))
+    assert_that(_duration(42_079), equal_to("42s"))
+    assert_that(_duration(90_000), equal_to("1min 30s"))
+    assert_that(_duration(3_603_000), equal_to("1h 3s"))
+    assert_that(_duration((2 * 30 + 8) * 86_400_000), equal_to("2m 1w 1d"))
+
+
+def _summary(**fields) -> dict:
+    return {
+        "summary_state": "final",
+        "summary_metrics": ["tool_calls"],
+        "tool_calls_success": 6,
+        "tool_success_rate": 100.0,
+        **fields,
+    }
+
+
+def test_session_tool_calls_report_the_summary_total_and_observed_outcomes():
+    assert_that(
+        _session_tool_calls(_summary(tool_call_count=6, tool_calls_total=6)),
+        equal_to(("6", "100% ok")),
+    )
+    assert_that(
+        _session_tool_calls(
+            _summary(tool_call_count=5, tool_calls_total=None, tool_success_rate=80.0)
+        ),
+        equal_to(("5", "Observed only · 80% ok")),
+    )
+    assert_that(
+        _session_tool_calls(
+            _summary(
+                tool_call_count=6, tool_calls_total=10, summary_state="provisional"
+            )
+        ),
+        equal_to(("10", "Provisional · 6 observed of 10 total · 100% ok")),
+    )
+    assert_that(
+        _session_tool_calls(_summary(tool_call_count=0, tool_calls_total=None)),
+        equal_to(("—", "Not reported")),
+    )
+    assert_that(
+        _session_tool_calls(_summary(tool_call_count=0, tool_calls_total=4)),
+        equal_to(("4", "No outcomes observed")),
+    )
+
+
 def _all_tokens(row: dict) -> int:
     return sum(
         row.get(k) or 0
@@ -267,9 +327,8 @@ def _assert_sessions_table(cli_analytics: CLIAnalyticsPage, data: dict):
 
 
 def _assert_table(cli_analytics: CLIAnalyticsPage, rows, expected: list[dict]):
-    rendered = cli_analytics.rendered_when(
-        lambda: _rendered(cli_analytics.read_table(rows), expected[0]), expected
-    )
+    cli_analytics.should_finish_loading()
+    rendered = _rendered(cli_analytics.read_table(rows), expected[0])
     assert_that(rendered, equal_to(expected))
 
 
@@ -333,9 +392,8 @@ def _all_kpis(k: dict, user_count: int | None) -> dict[str, tuple[str, str | Non
 def _assert_kpis(cli_analytics: CLIAnalyticsPage, expected: dict, cards=None):
     """Assert the metric cards of the page, or of ``cards`` (the session dialog)."""
     cards = cards or cli_analytics
-    rendered = cli_analytics.rendered_when(
-        lambda: _read_kpis(cards, expected), expected
-    )
+    cli_analytics.should_finish_loading()
+    rendered = _read_kpis(cards, expected)
     assert_that(rendered, equal_to(expected))
 
 
@@ -528,11 +586,7 @@ def test_session_modal_renders_session_detail_api(sessions_section):
         str(v) for v in (s["repository"], s["branch"], s["delivery_framework"]) if v
     )
     for line in (title, location):
-        assert_that(
-            modal.root.get_by_text(line, exact=True).count(),
-            equal_to(1),
-            f"dialog header line {line!r}",
-        )
+        modal.should_have_header_line(line)
     # Identity only: turns and token figures of a live session change between the requests.
     for field in ("repository", "branch", "delivery_framework"):
         assert_that(s[field], equal_to(row[field]), f"detail vs clicked row: {field}")

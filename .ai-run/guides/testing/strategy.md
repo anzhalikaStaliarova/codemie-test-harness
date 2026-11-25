@@ -46,7 +46,7 @@ a dedicated non-parallel pass.
 | `sanity` | marker, across areas | assistants / workflows / datasources without integrations; the only suite that needs no integration settings |
 | `smoke` | marker, across areas | quick checks for local development |
 | `enterprise` | marker, across areas | enterprise-only features |
-| `prod_regression` | marker, `ui` only | UI tests safe to run on PROD with a regular user or admin (not a maintainer); run with `-m "ui and prod_regression"`. Never on `budget`, `cli_analytics`, `auditor` or `aice` tests |
+| `prod_regression` | marker, `ui` and selected `api` tests | Tests safe to run on PROD with a regular user or admin (not a maintainer). For `cli_analytics`, this marker means read-only mode; `cli_analytics` tests without it are skipped on PROD |
 | feature markers (`budget`, `skill`, `user`, `project`, `cli_analytics`, …) | marker, across areas | one product area each; combine with `api` or `ui` |
 
 ## Markers
